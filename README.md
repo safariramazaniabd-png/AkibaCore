@@ -1,2 +1,48 @@
-# AkibaCore
-Application de bureau multiplateforme - Interface graphique moderne
+name: Build AkibaCore Multi-Platform
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            ext: ''
+          - os: windows-latest
+            name: windows
+            ext: .exe
+          - os: macos-13
+            name: macos
+            ext: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        shell: bash
+
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --name AkibaCore main.py
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        Fix YAMAL syntax
+        with:
+          name: AkibaCore-${{ matrix.name }}
+          path: dist/AkibaCore${{ matrix.ext }}
