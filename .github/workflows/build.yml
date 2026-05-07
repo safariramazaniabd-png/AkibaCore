@@ -46,4 +46,4 @@ jobs:
         with:
           name: AkibaCore-${{ matrix.name }}
           path: dist/AkibaCore${{ matrix.ext }}
-          Fix YAML syntax
+        
