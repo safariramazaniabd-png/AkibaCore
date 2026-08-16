@@ -5,7 +5,7 @@ from datetime import date
 import sys, os, hashlib, secrets, tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
-from main import Finance, DB, Auth
+from main import Finance, DB, Auth, TAUX_PENALITE_DEFAUT
 
 
 # ════════════════════════════════════════════════════════════════
@@ -219,10 +219,212 @@ class TestAuth(unittest.TestCase):
     def test_hachage_pbkdf2(self):
         """Verifie que le hash en BDD est bien un PBKDF2 et pas du SHA-256 brut."""
         u = self.db.un("SELECT * FROM utilisateur WHERE login='admin'")
-        # Un hash PBKDF2 fait 64 hex chars (256 bits) — meme taille que SHA-256 hex
-        # Mais on verifie qu'on ne peut pas le reproduire avec sha256 simple
         sha256_simple = hashlib.sha256(f"admin123{u['sel']}".encode()).hexdigest()
         self.assertNotEqual(sha256_simple, u["pwd_hash"])
+
+
+# ════════════════════════════════════════════════════════════════
+#  OPERATIONS METIER (epargne, credit, remboursement)
+# ════════════════════════════════════════════════════════════════
+
+class TestMetierEpargne(unittest.TestCase):
+    """Tests pour les operations d'epargne en BDD memoire."""
+
+    def setUp(self):
+        self.db = DB(":memory:")
+        self.db.exec("INSERT INTO membre(nom,prenom,avec_id) VALUES(?,?,?)",
+                     ("Dupont", "Marie", 1))
+        self.db.commit()
+        self.membre_id = self.db.valeur("SELECT id FROM membre WHERE nom='Dupont'")
+
+    def test_depot_epargne(self):
+        self.db.exec(
+            "INSERT INTO epargne(membre_id,montant,type,date_op) VALUES(?,?,?,?)",
+            (self.membre_id, 50_000, "ordinaire", "2025-06-15"))
+        self.db.commit()
+        total = Finance.solde_epargne(self.db, self.membre_id)
+        self.assertEqual(total, 50_000)
+
+    def test_depot_multiples(self):
+        for m in [10_000, 20_000, 5_000]:
+            self.db.exec(
+                "INSERT INTO epargne(membre_id,montant,type) VALUES(?,?,?)",
+                (self.membre_id, m, "ordinaire"))
+        self.db.commit()
+        self.assertEqual(Finance.solde_epargne(self.db, self.membre_id), 35_000)
+
+    def test_annulation_epargne(self):
+        self.db.exec(
+            "INSERT INTO epargne(membre_id,montant,type) VALUES(?,?,?)",
+            (self.membre_id, 50_000, "ordinaire"))
+        self.db.commit()
+        eid = self.db.valeur("SELECT id FROM epargne WHERE montant=50000")
+        self.db.exec("UPDATE epargne SET annule=1 WHERE id=?", (eid,))
+        self.db.commit()
+        self.assertEqual(Finance.solde_epargne(self.db, self.membre_id), 0)
+
+    def test_types_epargne(self):
+        for t in ["ordinaire", "solidarite", "urgence"]:
+            self.db.exec(
+                "INSERT INTO epargne(membre_id,montant,type) VALUES(?,?,?)",
+                (self.membre_id, 10_000, t))
+        self.db.commit()
+        total = self.db.valeur(
+            "SELECT COUNT(*) FROM epargne WHERE membre_id=? AND annule=0",
+            (self.membre_id,))
+        self.assertEqual(total, 3)
+
+
+class TestMetierCredit(unittest.TestCase):
+    """Tests pour les operations de credit en BDD memoire."""
+
+    def setUp(self):
+        self.db = DB(":memory:")
+        self.db.exec("INSERT INTO membre(nom,prenom,avec_id) VALUES(?,?,?)",
+                     ("Kabila", "Jean", 1))
+        self.db.commit()
+        self.membre_id = self.db.valeur("SELECT id FROM membre WHERE nom='Kabila'")
+
+    def test_octroi_credit(self):
+        inter = Finance.interet_simple(100_000, 0.10, 6)
+        total = 100_000 + inter
+        ech = Finance.date_echeance(date(2025, 1, 15), 6)
+        self.db.exec("""
+            INSERT INTO credit(membre_id,principal,taux,duree_mois,
+            date_octroi,date_echeance,montant_interet,montant_total)
+            VALUES(?,?,?,?,?,?,?,?)
+        """, (self.membre_id, 100_000, 0.10, 6,
+              "2025-01-15", ech.isoformat(), inter, total))
+        self.db.commit()
+        c = self.db.un("SELECT * FROM credit WHERE membre_id=?", (self.membre_id,))
+        self.assertIsNotNone(c)
+        self.assertEqual(c["principal"], 100_000)
+        self.assertEqual(c["montant_interet"], 5_000)
+        self.assertEqual(c["montant_total"], 105_000)
+        self.assertEqual(c["statut"], "actif")
+        self.assertEqual(c["rembourse"], 0)
+
+    def test_maj_statuts_retard(self):
+        ech = Finance.date_echeance(date(2024, 1, 1), 6)
+        self.db.exec("""
+            INSERT INTO credit(membre_id,principal,taux,duree_mois,
+            date_octroi,date_echeance,montant_interet,montant_total,statut)
+            VALUES(?,?,?,?,?,?,?,?,?)
+        """, (self.membre_id, 100_000, 0.10, 6,
+              "2024-01-01", ech.isoformat(), 5_000, 105_000, "actif"))
+        self.db.commit()
+        Finance.maj_statuts(self.db)
+        c = self.db.un("SELECT statut FROM credit WHERE membre_id=?", (self.membre_id,))
+        self.assertEqual(c["statut"], "en_retard")
+
+    def test_maj_statuts_solde(self):
+        ech = Finance.date_echeance(date(2025, 6, 1), 6)
+        self.db.exec("""
+            INSERT INTO credit(membre_id,principal,taux,duree_mois,
+            date_octroi,date_echeance,montant_interet,montant_total,rembourse,statut)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+        """, (self.membre_id, 100_000, 0.10, 6,
+              "2025-06-01", ech.isoformat(), 5_000, 105_000, 105_000, "actif"))
+        self.db.commit()
+        Finance.maj_statuts(self.db)
+        c = self.db.un("SELECT statut FROM credit WHERE membre_id=?", (self.membre_id,))
+        self.assertEqual(c["statut"], "solde")
+
+    def test_solde_credit(self):
+        ech = Finance.date_echeance(date(2025, 6, 1), 6)
+        self.db.exec("""
+            INSERT INTO credit(membre_id,principal,taux,duree_mois,
+            date_octroi,date_echeance,montant_interet,montant_total,rembourse)
+            VALUES(?,?,?,?,?,?,?,?,?)
+        """, (self.membre_id, 100_000, 0.10, 6,
+              "2025-06-01", ech.isoformat(), 5_000, 105_000, 30_000))
+        self.db.commit()
+        c = self.db.un("SELECT * FROM credit WHERE membre_id=?", (self.membre_id,))
+        self.assertEqual(Finance.solde_credit(c), 75_000)
+
+
+class TestMetierRemboursement(unittest.TestCase):
+    """Tests pour les remboursements et l'imputation penalty -> interet -> principal."""
+
+    def setUp(self):
+        self.db = DB(":memory:")
+        self.db.exec("INSERT INTO membre(nom,prenom,avec_id) VALUES(?,?,?)",
+                     ("Mubi", "Aline", 1))
+        self.db.commit()
+        self.mid = self.db.valeur("SELECT id FROM membre WHERE nom='Mubi'")
+
+        # Credit de 100 000 a 10% sur 6 mois = 5 000 interet = 105 000 total
+        ech = Finance.date_echeance(date(2025, 1, 1), 6)
+        self.db.exec("""
+            INSERT INTO credit(membre_id,principal,taux,duree_mois,
+            date_octroi,date_echeance,montant_interet,montant_total)
+            VALUES(?,?,?,?,?,?,?,?)
+        """, (self.mid, 100_000, 0.10, 6,
+              "2025-01-01", ech.isoformat(), 5_000, 105_000))
+        self.db.commit()
+        self.cid = self.db.valeur("SELECT id FROM credit WHERE membre_id=?", (self.mid,))
+
+    def test_remboursement_simple(self):
+        # Rembourser 20 000 sans retard (pas de penalite)
+        c = self.db.un("SELECT * FROM credit WHERE id=?", (self.cid,))
+        self.db.exec("""
+            INSERT INTO remboursement(credit_id,membre_id,mont_principal,
+            mont_interet,mont_penalite,montant_total,date_paiement)
+            VALUES(?,?,?,?,?,?,?)
+        """, (self.cid, self.mid, 20_000, 0, 0, 20_000, "2025-02-01"))
+        self.db.exec("UPDATE credit SET rembourse=rembourse+20000 WHERE id=?", (self.cid,))
+        self.db.commit()
+        c = self.db.un("SELECT * FROM credit WHERE id=?", (self.cid,))
+        self.assertEqual(c["rembourse"], 20_000)
+        self.assertEqual(Finance.solde_credit(c), 85_000)
+
+    def test_remboursement_integral(self):
+        # Rembourser la totalite
+        c = self.db.un("SELECT * FROM credit WHERE id=?", (self.cid,))
+        self.db.exec("""
+            INSERT INTO remboursement(credit_id,membre_id,mont_principal,
+            mont_interet,mont_penalite,montant_total,date_paiement)
+            VALUES(?,?,?,?,?,?,?)
+        """, (self.cid, self.mid, 105_000, 0, 0, 105_000, "2025-06-01"))
+        self.db.exec("UPDATE credit SET rembourse=105000,statut='solde' WHERE id=?", (self.cid,))
+        self.db.commit()
+        c = self.db.un("SELECT * FROM credit WHERE id=?", (self.cid,))
+        self.assertEqual(c["rembourse"], 105_000)
+        self.assertEqual(c["statut"], "solde")
+        self.assertEqual(Finance.solde_credit(c), 0)
+
+    def test_imputation_penalite_interet_principal(self):
+        """Verifie l'algorithme d'imputation : penalite -> interet -> principal."""
+        solde = 105_000
+        jr = 30  # 30 jours de retard
+        pen = Finance.penalite(solde, TAUX_PENALITE_DEFAUT, jr)
+        self.assertEqual(pen, 2_100)  # 105_000 * 0.02 * (30/30)
+
+        mt_paye = 10_000
+        pen_pay = min(pen, mt_paye)  # 2_100
+        reste = mt_paye - pen_pay    # 7_900
+        ratio_i = 5_000 / 105_000   # ~0.0476
+        int_pay = round(reste * ratio_i, 2)
+        prin_pay = round(reste - int_pay, 2)
+
+        self.assertEqual(pen_pay, 2_100)
+        self.assertGreater(int_pay, 0)
+        self.assertGreater(prin_pay, 0)
+        self.assertAlmostEqual(pen_pay + int_pay + prin_pay, mt_paye, places=2)
+
+    def test_statut_en_retard_apres_echeance(self):
+        ech = Finance.date_echeance(date(2024, 6, 1), 6)
+        self.db.exec("""
+            INSERT INTO credit(membre_id,principal,taux,duree_mois,
+            date_octroi,date_echeance,montant_interet,montant_total)
+            VALUES(?,?,?,?,?,?,?,?)
+        """, (self.mid, 50_000, 0.10, 6,
+              "2024-06-01", ech.isoformat(), 2_500, 52_500))
+        self.db.commit()
+        Finance.maj_statuts(self.db)
+        c = self.db.un("SELECT statut FROM credit WHERE membre_id=? AND montant_total=52500",
+                       (self.mid,))
+        self.assertEqual(c["statut"], "en_retard")
 
 
 if __name__ == "__main__":
