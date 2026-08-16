@@ -19,6 +19,7 @@ import os
 import shutil
 import csv
 import json
+import html
 from datetime import datetime, date
 from pathlib import Path
 
@@ -255,7 +256,7 @@ class DB:
         """Données initiales (admin + AVEC par défaut)."""
         if not self.valeur("SELECT COUNT(*) FROM utilisateur"):
             sel = secrets.token_hex(16)
-            ph  = hashlib.sha256(f"admin123{sel}".encode()).hexdigest()
+            ph  = hashlib.pbkdf2_hmac('sha256', f"admin123{sel}".encode(), sel.encode(), 100000).hex()
             self.exec(
                 "INSERT INTO utilisateur(nom,login,pwd_hash,sel,role)"
                 " VALUES(?,?,?,?,?)",
@@ -307,9 +308,10 @@ class Finance:
         mois  = date_octroi.month + duree_mois
         annee = date_octroi.year + (mois - 1) // 12
         mois  = (mois - 1) % 12 + 1
+        bissextile = annee % 4 == 0 and (annee % 100 != 0 or annee % 400 == 0)
         jour  = min(date_octroi.day,
-                    [31,29 if annee%4==0 else 28,31,30,31,30,
-                     31,31,30,31,30,31][mois-1])
+                    [31, 29 if bissextile else 28, 31, 30, 31, 30,
+                     31, 31, 30, 31, 30, 31][mois-1])
         return date(annee, mois, jour)
 
     @staticmethod
@@ -363,7 +365,7 @@ class Auth:
         u = self.db.un("SELECT * FROM utilisateur WHERE login=? AND actif=1", (login,))
         if not u:
             return False
-        if hashlib.sha256(f"{mdp}{u['sel']}".encode()).hexdigest() == u["pwd_hash"]:
+        if hashlib.pbkdf2_hmac('sha256', f"{mdp}{u['sel']}".encode(), u['sel'].encode(), 100000).hex() == u["pwd_hash"]:
             self.user = u
             self.db.audit(u["id"], login, "CONNEXION")
             return True
@@ -373,7 +375,7 @@ class Auth:
         if not self.connecter(login, ancien):
             raise ValueError("Ancien mot de passe incorrect.")
         sel = secrets.token_hex(16)
-        ph  = hashlib.sha256(f"{nouveau}{sel}".encode()).hexdigest()
+        ph  = hashlib.pbkdf2_hmac('sha256', f"{nouveau}{sel}".encode(), sel.encode(), 100000).hex()
         self.db.exec("UPDATE utilisateur SET pwd_hash=?,sel=? WHERE login=?", (ph, sel, login))
         self.db.commit()
         self.user = self.db.un("SELECT * FROM utilisateur WHERE login=?", (login,))
@@ -1426,21 +1428,26 @@ class DlgRemboursement(tk.Toplevel):
             prin_pay = round(reste - int_pay, 2)
 
             mid = self.db.valeur("SELECT membre_id FROM credit WHERE id=?", (c["id"],))
-            cur = self.db.exec("""
-                INSERT INTO remboursement
-                (credit_id,membre_id,mont_principal,mont_interet,mont_penalite,
-                 montant_total,date_paiement,description,cree_par)
-                VALUES(?,?,?,?,?,?,?,?,?)
-            """, (c["id"], mid, prin_pay, int_pay, pen_pay,
-                  mt, dt.isoformat(), self.v_dc.get().strip() or None, self.auth.uid))
+            self.db.exec("BEGIN")
+            try:
+                cur = self.db.exec("""
+                    INSERT INTO remboursement
+                    (credit_id,membre_id,mont_principal,mont_interet,mont_penalite,
+                     montant_total,date_paiement,description,cree_par)
+                    VALUES(?,?,?,?,?,?,?,?,?)
+                """, (c["id"], mid, prin_pay, int_pay, pen_pay,
+                      mt, dt.isoformat(), self.v_dc.get().strip() or None, self.auth.uid))
 
-            nouveau_remb  = c["rembourse"] + mt
-            nouveau_remb  = min(nouveau_remb, c["montant_total"])
-            nouveau_statut = ("solde" if nouveau_remb >= c["montant_total"] else
-                              "en_retard" if jr > 0 else "actif")
-            self.db.exec("UPDATE credit SET rembourse=?,statut=? WHERE id=?",
-                         (nouveau_remb, nouveau_statut, c["id"]))
-            self.db.commit()
+                nouveau_remb  = c["rembourse"] + mt
+                nouveau_remb  = min(nouveau_remb, c["montant_total"])
+                nouveau_statut = ("solde" if nouveau_remb >= c["montant_total"] else
+                                  "en_retard" if jr > 0 else "actif")
+                self.db.exec("UPDATE credit SET rembourse=?,statut=? WHERE id=?",
+                             (nouveau_remb, nouveau_statut, c["id"]))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
             self.db.audit(self.auth.uid, self.auth.ulogin, "REMBOURSEMENT",
                           "remboursement", cur.lastrowid,
                           {"credit_id": c["id"], "montant": mt})
@@ -1727,18 +1734,24 @@ class OngletRapports(ttk.Frame):
         """, (self.avec_id,))
 
         def tr_m(m):
-            return (f"<tr><td>{m['nom']} {m['prenom'] or ''}</td>"
-                    f"<td>{m['telephone'] or ''}</td><td>{m['statut']}</td>"
+            nom = html.escape(f"{m['nom']} {m['prenom'] or ''}".strip())
+            tel = html.escape(m['telephone'] or '')
+            statut = html.escape(m['statut'])
+            return (f"<tr><td>{nom}</td>"
+                    f"<td>{tel}</td><td>{statut}</td>"
                     f"<td>{m['ep']:,.0f}</td></tr>")
         def tr_r(r):
             solde_cr = r["montant_total"] - r["rembourse"]
             jr = Finance.jours_retard(r["date_echeance"])
-            return (f"<tr class='alerte'><td>{r['nom']} {r['prenom'] or ''}</td>"
-                    f"<td>{r['telephone'] or ''}</td>"
-                    f"<td>{solde_cr:,.0f}</td><td>{r['date_echeance']}</td>"
+            nom = html.escape(f"{r['nom']} {r['prenom'] or ''}".strip())
+            tel = html.escape(r['telephone'] or '')
+            ech = html.escape(str(r['date_echeance']))
+            return (f"<tr class='alerte'><td>{nom}</td>"
+                    f"<td>{tel}</td>"
+                    f"<td>{solde_cr:,.0f}</td><td>{ech}</td>"
                     f"<td>{jr}j</td></tr>")
 
-        html = f"""<!DOCTYPE html>
+        rapport = f"""<!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8">
 <title>Rapport {APP_NOM}</title>
 <style>
@@ -1781,7 +1794,7 @@ class OngletRapports(ttk.Frame):
             return
         try:
             with open(p, "w", encoding="utf-8") as f:
-                f.write(html)
+                f.write(rapport)
             messagebox.showinfo("Rapport créé", f"Rapport HTML sauvegardé :\n{p}")
             self.db.audit(self.auth.uid, self.auth.ulogin, "EXPORT_HTML",
                           details={"fichier": p})
@@ -1823,6 +1836,7 @@ class AkibaCore(tk.Tk):
         self.db   = DB()
         self.auth = Auth(self.db)
         self.bkp  = Backup()
+        self._backup_after_id = None
 
         self.protocol("WM_DELETE_WINDOW", self._quitter)
         self._lancer_connexion()
@@ -1890,7 +1904,7 @@ class AkibaCore(tk.Tk):
             self.bkp.sauvegarder()
         except Exception:
             pass
-        self.after(30 * 60 * 1000, self._auto_backup)   # toutes les 30 min
+        self._backup_after_id = self.after(30 * 60 * 1000, self._auto_backup)   # toutes les 30 min
 
     # ── Actions utilisateur ───────────────────────────────────────
     def _changer_mdp(self):
@@ -1928,6 +1942,9 @@ class AkibaCore(tk.Tk):
 
     def _deconnecter(self):
         if messagebox.askyesno("Déconnexion", "Se déconnecter de AkibaCore ?"):
+            if self._backup_after_id is not None:
+                self.after_cancel(self._backup_after_id)
+                self._backup_after_id = None
             self.db.audit(self.auth.uid, self.auth.ulogin, "DÉCONNEXION")
             self.auth.user = None
             for w in self.winfo_children():
@@ -1936,6 +1953,9 @@ class AkibaCore(tk.Tk):
             self._lancer_connexion()
 
     def _quitter(self):
+        if self._backup_after_id is not None:
+            self.after_cancel(self._backup_after_id)
+            self._backup_after_id = None
         try:
             self.bkp.sauvegarder()
         except Exception:

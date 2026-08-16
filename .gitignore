@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AkibaCore — donnees utilisateur
+akibacore.db
+akibacore.db-wal
+akibacore.db-shm
+sauvegardes/
