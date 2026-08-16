@@ -222,3 +222,7 @@ akibacore.db
 akibacore.db-wal
 akibacore.db-shm
 sauvegardes/
+
+# AkibaCore — dossiers non tracked
+AkibaCore_SAUVEGARDE/
+AkibaCore app.exe/
