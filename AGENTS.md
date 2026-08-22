@@ -23,11 +23,11 @@ Linux necessite `python3-tk` : `sudo apt install python3-tk`
 ```bash
 # Linux
 pip3 install pyinstaller
-pyinstaller avec_bukavu.spec --clean   # → dist/AVEC_Bukavu
+pyinstaller avec_bukavu.spec --clean   # → dist/AkibaCore
 
 # Windows
 pip install pyinstaller
-pyinstaller avec_bukavu.spec --clean   # → dist\AVEC_Bukavu.exe
+pyinstaller avec_bukavu.spec --clean   # → dist\AkibaCore.exe
 ```
 
 CI construit aussi via PyInstaller directement : `pyinstaller --onefile --name AkibaCore main.py`
@@ -52,9 +52,11 @@ Tout le code vit dans `main.py`. Classes principales dans l'ordre :
 | `OngletRapports` | Export CSV + rapport HTML + sauvegarde manuelle |
 | `AkibaCore` | Fenetre principale, conteneur d'onglets, timer sauvegarde periodique |
 
-## Pas de tests ni de linter
+## Tests
 
-Il n'y a aucun test automatise, aucune config de linter, aucun type checker. La CI construit uniquement l'executable.
+Deux suites sans framework (bibliotheque standard `unittest`) :
+`python3 test_finance.py` (61 tests) et `python3 test_complet.py` (131 tests),
+ou simplement `make test`. Aucun linter ni type checker. La CI construit uniquement l'executable.
 
 ## Points de vigilance
 

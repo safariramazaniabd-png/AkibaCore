@@ -226,3 +226,6 @@ sauvegardes/
 # AkibaCore — dossiers non tracked
 AkibaCore_SAUVEGARDE/
 AkibaCore app.exe/
+
+# Fichiers de sauvegarde editeur
+*.bak

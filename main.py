@@ -13,13 +13,16 @@ Version : 2.0.0
 import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
+import tkinter.font as tkFont
 import hashlib
 import secrets
 import os
+import sys
 import shutil
 import csv
 import json
 import html
+import math
 from datetime import datetime, date
 from pathlib import Path
 
@@ -28,30 +31,83 @@ from pathlib import Path
 #  CONFIGURATION GLOBALE
 # ════════════════════════════════════════════════════════════════
 
+def _repertoire_application() -> Path:
+    """Dossier de l'application (exe PyInstaller ou script), jamais le CWD.
+
+    Garantit que la base et les sauvegardes sont toujours créées à côté
+    du programme, quel que soit le répertoire de lancement de l'utilisateur.
+    """
+    if getattr(sys, "frozen", False):            # Exécutable PyInstaller
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 APP_NOM      = "AkibaCore"
 APP_VERSION  = "2.0.0"
-DB_CHEMIN    = "akibacore.db"
-BACKUP_DIR   = Path("sauvegardes")
+REPERTOIRE_APP = _repertoire_application()
+DB_CHEMIN    = str(REPERTOIRE_APP / "akibacore.db")
+BACKUP_DIR   = REPERTOIRE_APP / "sauvegardes"
 BACKUP_MAX   = 15
+MDP_DEFAUT   = "admin123"                        # Mot de passe initial admin
 
 TAUX_INTERET_DEFAUT  = 0.10   # 10 % annuel
 TAUX_PENALITE_DEFAUT = 0.02   # 2 % / mois de retard
 MONTANT_PART_DEFAUT  = 5_000  # FC
 
-C = {                          # Palette de couleurs
-    "bleu":    "#1A5276",
-    "bleu_f":  "#154360",
-    "vert":    "#1E8449",
-    "vert_c":  "#2ECC71",
-    "or":      "#D4AC0D",
-    "rouge":   "#C0392B",
-    "gris":    "#F4F6F7",
-    "gris_f":  "#D5D8DC",
-    "texte":   "#1C2833",
-    "blanc":   "#FFFFFF",
-    "ligne_p": "#EAF2FF",
-    "ligne_i": "#FFFFFF",
+C = {                          # Palette de couleurs etendue
+    # Primary
+    "bleu":       "#1A5276",
+    "bleu_f":     "#154360",
+    "bleu_clair": "#2980B9",
+    "bleu_pale":  "#D6EAF8",
+    # Accent
+    "vert":       "#1E8449",
+    "vert_c":     "#2ECC71",
+    "or":         "#D4AC0D",
+    "or_clair":   "#F9E79F",
+    "rouge":      "#C0392B",
+    "rouge_clair":"#E74C3C",
+    "violet":     "#6C3483",
+    # Neutre
+    "gris":       "#F4F6F7",
+    "gris_f":     "#D5D8DC",
+    "gris_fonce": "#566573",
+    "texte":      "#1C2833",
+    "texte_mute": "#5D6D7E",
+    "blanc":      "#FFFFFF",
+    # Sidebar
+    "sidebar_bg": "#1B2631",
+    "sidebar_hl": "#2C3E50",
+    "sidebar_tx": "#AEB6BF",
+    "sidebar_act":"#2980B9",
+    # Cards
+    "ligne_p":    "#EAF2FF",
+    "ligne_i":    "#FFFFFF",
 }
+
+
+FONT = None  # Resolu plus tard quand Tk est disponible
+
+# Rate limiting pour la connexion
+_TENTATIVES_CONNEXION = {}  # {login: (nb_tentatives, timestamp_premiere)}
+_LOCKOUT_SECONDS = 30
+_MAX_TENTATIVES = 5
+
+def _resoudre_font(root=None):
+    """Choisir la meilleure police disponible selon la plateforme (appele apres Tk init)."""
+    global FONT
+    if FONT is not None:
+        return FONT
+    try:
+        available = set(tkFont.families())
+        for name in ("Segoe UI", "Noto Sans", "DejaVu Sans", "Liberation Sans", "Arial"):
+            if name in available:
+                FONT = name
+                return FONT
+    except Exception:
+        pass
+    FONT = "TkDefaultFont"
+    return FONT
 
 
 # ════════════════════════════════════════════════════════════════
@@ -250,6 +306,19 @@ class DB:
         );
         """)
         c.commit()
+        # Index pour performance
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_epargne_membre ON epargne(membre_id)",
+            "CREATE INDEX IF NOT EXISTS idx_epargne_session ON epargne(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_credit_membre ON credit(membre_id)",
+            "CREATE INDEX IF NOT EXISTS idx_credit_statut ON credit(statut)",
+            "CREATE INDEX IF NOT EXISTS idx_credit_echeance ON credit(date_echeance)",
+            "CREATE INDEX IF NOT EXISTS idx_remboursement_credit ON remboursement(credit_id)",
+            "CREATE INDEX IF NOT EXISTS idx_remboursement_membre ON remboursement(membre_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
+        ]:
+            c.execute(idx_sql)
+        c.commit()
         self._seeds()
 
     def _seeds(self):
@@ -403,7 +472,17 @@ class Backup:
         self.rep = Path(rep)
 
     def sauvegarder(self):
-        self.rep.mkdir(exist_ok=True)
+        self.rep.mkdir(parents=True, exist_ok=True)
+        # Checkpoint WAL : garantir que le fichier .db contient toutes les
+        # écritures récentes avant la copie (sinon sauvegarde incomplète).
+        try:
+            conn = sqlite3.connect(self.src)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+        except Exception:
+            pass  # La sauvegarde ne doit jamais être bloquée
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = self.rep / f"akibacore_{ts}.db"
         shutil.copy2(self.src, dest)
@@ -413,53 +492,274 @@ class Backup:
             backups.pop(0).unlink(missing_ok=True)
         return str(dest)
 
+    @staticmethod
+    def derniere_sauvegarde(rep=BACKUP_DIR):
+        """Chemin de la sauvegarde la plus récente, ou None."""
+        backups = sorted(Path(rep).glob("akibacore_*.db"))
+        return str(backups[-1]) if backups else None
+
+    @staticmethod
+    def restaurer(db_chemin=DB_CHEMIN, rep=BACKUP_DIR):
+        """Restaure la dernière sauvegarde vers le chemin de la base.
+
+        Retourne le chemin du fichier restauré, ou None si aucun backup.
+        Ne supprime jamais la base actuelle sans l'écraser par un backup.
+        """
+        src = Backup.derniere_sauvegarde(rep)
+        if not src:
+            return None
+        shutil.copy2(src, db_chemin)
+        # Supprimer les fichiers WAL/SHM obsolètes liés à l'ancienne base
+        for suffixe in ("-wal", "-shm"):
+            try:
+                Path(str(db_chemin) + suffixe).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return src
+
+
+# ════════════════════════════════════════════════════════════════
+#  MOTEUR DE GRAPHIQUES (Canvas pur, zero dependance)
+# ════════════════════════════════════════════════════════════════
+
+class ChartEngine:
+    """Graphiques statiques dessines sur un tk.Canvas."""
+
+    @staticmethod
+    def bar(canvas, data, hauteur=180, padding=40):
+        """
+        Diagramme en barres.
+        data : [(label, valeur, couleur), ...]
+        """
+        canvas.delete("all")
+        canvas.update_idletasks()
+        w = max(canvas.winfo_width(), 300)
+        h = hauteur
+        canvas.config(height=h)
+        if not data:
+            return
+        max_val = max(v for _, v, _ in data) or 1
+        nb = len(data)
+        zone_w = w - padding * 2
+        bar_w = max(zone_w // (nb * 2), 20)
+        echelle = (h - 50) / max_val
+
+        # Ligne de base
+        canvas.create_line(padding, h - 30, w - padding, h - 30, fill=C["gris_f"])
+
+        for i, (label, valeur, couleur) in enumerate(data):
+            x = padding + i * (zone_w // nb) + (zone_w // nb - bar_w) // 2
+            bh = max(int(valeur * echelle), 2)
+            y_top = h - 30 - bh
+            # Barre
+            canvas.create_rectangle(x, y_top, x + bar_w, h - 30,
+                                    fill=couleur, outline="", width=0)
+            # Valeur
+            canvas.create_text(x + bar_w // 2, y_top - 6,
+                               text=f"{valeur:,.0f}", anchor="s",
+                               fill=C["texte"], font=(FONT, 8, "bold"))
+            # Label
+            canvas.create_text(x + bar_w // 2, h - 14,
+                               text=label, anchor="n",
+                               fill=C["texte_mute"], font=(FONT, 8))
+
+    @staticmethod
+    def pie(canvas, data, rayon=None):
+        """
+        Diagramme circulaire.
+        data : [(label, valeur, couleur), ...]
+        """
+        canvas.delete("all")
+        canvas.update_idletasks()
+        w = max(canvas.winfo_width(), 250)
+        h = max(canvas.winfo_height(), 200)
+        canvas.config(height=h)
+        if not data:
+            return
+        total = sum(v for _, v, _ in data)
+        if total == 0:
+            return
+        cx, cy = w // 2 - 40, h // 2
+        r = rayon or min(cx - 10, cy - 10, 80)
+        angle = 0
+        for label, valeur, couleur in data:
+            extent = (valeur / total) * 360
+            if extent > 0.5:
+                canvas.create_arc(cx - r, cy - r, cx + r, cy + r,
+                                  start=angle, extent=extent,
+                                  fill=couleur, outline=C["blanc"], style="pieslice")
+            angle += extent
+
+        # Legende a droite
+        lx = cx + r + 20
+        ly = cy - (len(data) * 14) // 2
+        for i, (label, valeur, couleur) in enumerate(data):
+            y = ly + i * 18
+            canvas.create_rectangle(lx, y, lx + 10, y + 10, fill=couleur, outline="")
+            pct = (valeur / total) * 100
+            canvas.create_text(lx + 16, y + 5, anchor="w",
+                               text=f"{label} ({pct:.0f}%)",
+                               fill=C["texte"], font=(FONT, 8))
+
+    @staticmethod
+    def line(canvas, data, hauteur=160, padding=40):
+        """
+        Courbe d'evolution.
+        data : [(label, valeur), ...] — les labels servent d'axe X
+        """
+        canvas.delete("all")
+        canvas.update_idletasks()
+        w = max(canvas.winfo_width(), 300)
+        h = hauteur
+        canvas.config(height=h)
+        if len(data) < 2:
+            return
+        valeurs = [v for _, v in data]
+        max_val = max(valeurs) or 1
+        min_val = min(valeurs)
+        echelle = (h - 50) / (max_val - min_val if max_val != min_val else 1)
+        zone_w = w - padding * 2
+
+        # Ligne de base + grille
+        canvas.create_line(padding, h - 30, w - padding, h - 30, fill=C["gris_f"])
+        for i in range(4):
+            y = h - 30 - int(i * (h - 50) / 3)
+            canvas.create_line(padding, y, w - padding, y,
+                               fill=C["gris_f"], dash=(2, 4))
+
+        # Points et lignes
+        points = []
+        for i, (label, valeur) in enumerate(data):
+            x = padding + int(i * zone_w / (len(data) - 1))
+            y = h - 30 - int((valeur - min_val) * echelle)
+            points.append((x, y))
+            # Label X
+            if len(data) <= 12 or i % max(1, len(data) // 6) == 0:
+                canvas.create_text(x, h - 14, text=label, anchor="n",
+                                   fill=C["texte_mute"], font=(FONT, 7))
+
+        # Remplissage sous la courbe
+        fill_pts = [(points[0][0], h - 30)] + points + [(points[-1][0], h - 30)]
+        flat = [c for p in fill_pts for c in p]
+        canvas.create_polygon(flat, fill=C["bleu_pale"], outline="", smooth=False)
+
+        # Ligne de la courbe
+        for i in range(len(points) - 1):
+            canvas.create_line(points[i], points[i + 1],
+                               fill=C["bleu"], width=2, smooth=True)
+        # Dots
+        for x, y in points:
+            canvas.create_oval(x - 3, y - 3, x + 3, y + 3,
+                               fill=C["bleu"], outline=C["blanc"], width=1)
+
+    @staticmethod
+    def svg_bar(data, w=480, h=200):
+        """Génère un diagramme en barres SVG inline."""
+        if not data:
+            return ""
+        max_val = max(v for _, v, _ in data) or 1
+        nb = len(data)
+        bw = max((w - 60) // (nb * 2), 24)
+        echelle = (h - 45) / max_val
+        parts = [f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">']
+        parts.append(f'<line x1="30" y1="{h-25}" x2="{w-10}" y2="{h-25}" stroke="#D5D8DC" stroke-width="1"/>')
+        for i, (label, value, color) in enumerate(data):
+            x = 40 + i * ((w - 60) // nb) + ((w - 60) // nb - bw) // 2
+            bh = max(int(value * echelle), 2)
+            y_top = h - 25 - bh
+            parts.append(f'<rect x="{x}" y="{y_top}" width="{bw}" height="{bh}" fill="{color}" rx="3"/>')
+            parts.append(f'<text x="{x + bw // 2}" y="{y_top - 4}" text-anchor="middle" '
+                         f'font-size="10" font-weight="bold" fill="{color}">{value:,.0f}</text>')
+            parts.append(f'<text x="{x + bw // 2}" y="{h - 8}" text-anchor="middle" '
+                         f'font-size="9" fill="#566573">{label}</text>')
+        parts.append('</svg>')
+        return '\n'.join(parts)
+
+    @staticmethod
+    def svg_pie(data, size=200):
+        """Génère un diagramme circulaire SVG inline."""
+        if not data:
+            return ""
+        total = sum(v for _, v, _ in data)
+        if total == 0:
+            return ""
+        cx, cy, r = size // 2 + 20, size // 2, size // 2 - 20
+        parts = [f'<svg width="{size + 140}" height="{size}" xmlns="http://www.w3.org/2000/svg">']
+        angle = -90
+        for label, value, color in data:
+            pct = value / total
+            if pct < 0.001:
+                continue
+            end_angle = angle + pct * 360
+            a1 = math.radians(angle)
+            a2 = math.radians(end_angle)
+            x1, y1 = cx + r * math.cos(a1), cy + r * math.sin(a1)
+            x2, y2 = cx + r * math.cos(a2), cy + r * math.sin(a2)
+            large = 1 if pct > 0.5 else 0
+            parts.append(
+                f'<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} '
+                f'A{r},{r} 0 {large},1 {x2:.1f},{y2:.1f} Z" '
+                f'fill="{color}" stroke="#fff" stroke-width="1.5"/>')
+            angle = end_angle
+        for i, (label, value, color) in enumerate(data):
+            y = 20 + i * 22
+            lx = size + 30
+            pct = (value / total) * 100
+            parts.append(f'<rect x="{lx}" y="{y}" width="12" height="12" fill="{color}" rx="2"/>')
+            parts.append(f'<text x="{lx + 18}" y="{y + 10}" font-size="10" fill="#1C2833">'
+                         f'{label} ({pct:.0f}%)</text>')
+        parts.append('</svg>')
+        return '\n'.join(parts)
+
 
 # ════════════════════════════════════════════════════════════════
 #  STYLES TTK
 # ════════════════════════════════════════════════════════════════
 
 def appliquer_styles(root):
+    _resoudre_font(root)
     s = ttk.Style(root)
     s.theme_use("clam")
 
     s.configure("TFrame",        background=C["gris"])
     s.configure("Blanc.TFrame",  background=C["blanc"])
-    s.configure("TLabel",        background=C["gris"], foreground=C["texte"], font=("Segoe UI", 10))
+    s.configure("TLabel",        background=C["gris"], foreground=C["texte"],
+                                 font=(FONT, 10))
     s.configure("Titre.TLabel",  background=C["gris"], foreground=C["bleu"],
-                                 font=("Segoe UI", 15, "bold"))
+                                 font=(FONT, 15, "bold"))
     s.configure("Sub.TLabel",    background=C["gris"], foreground=C["bleu"],
-                                 font=("Segoe UI", 11, "bold"))
+                                 font=(FONT, 11, "bold"))
     s.configure("Bold.TLabel",   background=C["blanc"], foreground=C["texte"],
-                                 font=("Segoe UI", 10, "bold"))
+                                 font=(FONT, 10, "bold"))
 
-    s.configure("TButton",       font=("Segoe UI", 10), padding=6)
+    s.configure("TButton",       font=(FONT, 10), padding=6)
     s.configure("Bleu.TButton",  background=C["bleu"],  foreground=C["blanc"],
-                                 font=("Segoe UI", 10, "bold"), padding=8)
+                                 font=(FONT, 10, "bold"), padding=8)
     s.map("Bleu.TButton",  background=[("active", C["bleu_f"])])
     s.configure("Vert.TButton",  background=C["vert"],  foreground=C["blanc"],
-                                 font=("Segoe UI", 10, "bold"), padding=8)
+                                 font=(FONT, 10, "bold"), padding=8)
     s.map("Vert.TButton",  background=[("active", "#176338")])
     s.configure("Rouge.TButton", background=C["rouge"], foreground=C["blanc"],
-                                 font=("Segoe UI", 10, "bold"), padding=8)
+                                 font=(FONT, 10, "bold"), padding=8)
     s.map("Rouge.TButton", background=[("active", "#A93226")])
 
     s.configure("TNotebook",     background=C["gris"], borderwidth=0)
-    s.configure("TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(14, 7))
+    s.configure("TNotebook.Tab", font=(FONT, 10, "bold"), padding=(14, 7))
     s.map("TNotebook.Tab",
           background=[("selected", C["bleu"]), ("!selected", C["gris_f"])],
           foreground=[("selected", C["blanc"]), ("!selected", C["texte"])])
 
-    s.configure("Treeview",          font=("Segoe UI", 10), rowheight=26,
+    s.configure("Treeview",          font=(FONT, 10), rowheight=26,
                                      background=C["blanc"], foreground=C["texte"],
                                      fieldbackground=C["blanc"])
-    s.configure("Treeview.Heading",  font=("Segoe UI", 10, "bold"),
+    s.configure("Treeview.Heading",  font=(FONT, 10, "bold"),
                                      background=C["bleu"], foreground=C["blanc"])
     s.map("Treeview",                background=[("selected", C["or"])])
-    s.configure("TEntry",            font=("Segoe UI", 10), padding=5)
-    s.configure("TCombobox",         font=("Segoe UI", 10), padding=5)
+    s.configure("TEntry",            font=(FONT, 10), padding=5)
+    s.configure("TCombobox",         font=(FONT, 10), padding=5)
     s.configure("TLabelframe",       background=C["gris"])
     s.configure("TLabelframe.Label", background=C["gris"], foreground=C["bleu"],
-                                     font=("Segoe UI", 10, "bold"))
+                                     font=(FONT, 10, "bold"))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -520,6 +820,76 @@ def centrer(win, w, h):
 
 
 # ════════════════════════════════════════════════════════════════
+#  BARRE LATÉRALE DE NAVIGATION
+# ════════════════════════════════════════════════════════════════
+
+class Sidebar(tk.Frame):
+    """Barre latérale de navigation remplaçant le Notebook."""
+
+    def __init__(self, parent, items, callback):
+        """
+        items   : [(nom_affiche, icone_unicode), ...]
+        callback(index) : appele quand un item est clique
+        """
+        super().__init__(parent, bg=C["sidebar_bg"], width=210)
+        self.pack_propagate(False)
+        self._items = []
+        self._callback = callback
+        self._actif = -1
+
+        # Logo / Titre
+        tk.Label(self, text=APP_NOM, bg=C["sidebar_bg"], fg=C["blanc"],
+                 font=(FONT, 14, "bold"), pady=14).pack(fill="x")
+        tk.Frame(self, bg=C["sidebar_hl"], height=1).pack(fill="x", padx=12)
+
+        for i, (nom, icone) in enumerate(items):
+            self._ajouter_item(i, nom, icone)
+
+    def _ajouter_item(self, index, nom, icone):
+        f = tk.Frame(self, bg=C["sidebar_bg"], cursor="hand2")
+        f.pack(fill="x", padx=0, pady=1)
+
+        lbl_icone = tk.Label(f, text=icone, bg=C["sidebar_bg"],
+                             fg=C["sidebar_tx"], font=(FONT, 14), width=3)
+        lbl_icone.pack(side="left", padx=(12, 4), pady=8)
+
+        lbl_texte = tk.Label(f, text=nom, bg=C["sidebar_bg"],
+                             fg=C["sidebar_tx"], font=(FONT, 11))
+        lbl_texte.pack(side="left", padx=4, pady=8)
+
+        self._items.append((f, lbl_icone, lbl_texte))
+
+        for w in (f, lbl_icone, lbl_texte):
+            w.bind("<Enter>", lambda e, idx=index: self._on_hover(idx, True))
+            w.bind("<Leave>", lambda e, idx=index: self._on_hover(idx, False))
+            w.bind("<Button-1>", lambda e, idx=index: self.selectionner(idx))
+
+    def _on_hover(self, index, entree):
+        if index == self._actif:
+            return
+        _, li, lt = self._items[index]
+        bg = C["sidebar_hl"] if entree else C["sidebar_bg"]
+        fg = C["blanc"] if entree else C["sidebar_tx"]
+        for w in (li, lt):
+            w.config(bg=bg, fg=fg)
+
+    def selectionner(self, index):
+        if index == self._actif:
+            return
+        # Desactiver ancien
+        if 0 <= self._actif < len(self._items):
+            _, li, lt = self._items[self._actif]
+            for w in (li, lt):
+                w.config(bg=C["sidebar_bg"], fg=C["sidebar_tx"])
+        # Activer nouveau
+        f, li, lt = self._items[index]
+        for w in (li, lt):
+            w.config(bg=C["sidebar_act"], fg=C["blanc"])
+        self._actif = index
+        self._callback(index)
+
+
+# ════════════════════════════════════════════════════════════════
 #  ÉCRAN DE CONNEXION
 # ════════════════════════════════════════════════════════════════
 
@@ -538,10 +908,10 @@ class EcranConnexion(tk.Toplevel):
 
     def _ui(self):
         # En-tête
-        tk.Label(self, text=APP_NOM, font=("Segoe UI", 28, "bold"),
+        tk.Label(self, text=APP_NOM, font=(FONT, 28, "bold"),
                  fg=C["blanc"], bg=C["bleu"]).pack(pady=(30, 4))
         tk.Label(self, text="Gestion AVEC — Accès sécurisé",
-                 font=("Segoe UI", 10), fg="#AED6F1", bg=C["bleu"]).pack(pady=(0, 16))
+                 font=(FONT, 10), fg="#AED6F1", bg=C["bleu"]).pack(pady=(0, 16))
 
         # Formulaire blanc
         f = tk.Frame(self, bg=C["blanc"])
@@ -552,7 +922,7 @@ class EcranConnexion(tk.Toplevel):
             ("Mot de passe",  "v_mdp",   "*"),
         ]):
             tk.Label(f, text=lbl, bg=C["blanc"],
-                     font=("Segoe UI", 10)).grid(row=row*2,   column=0, sticky="w", padx=12, pady=(10,2))
+                     font=(FONT, 10)).grid(row=row*2,   column=0, sticky="w", padx=12, pady=(10,2))
             setattr(self, attr, tk.StringVar())
             e = ttk.Entry(f, textvariable=getattr(self, attr), show=show, width=26)
             e.grid(row=row*2+1, column=0, padx=12, sticky="ew", pady=(0, 6))
@@ -563,28 +933,118 @@ class EcranConnexion(tk.Toplevel):
         # Message
         self.v_msg = tk.StringVar()
         tk.Label(self, textvariable=self.v_msg, fg="#FADBD8",
-                 bg=C["bleu"], font=("Segoe UI", 9)).pack(pady=(8, 0))
+                 bg=C["bleu"], font=(FONT, 9)).pack(pady=(8, 0))
 
         tk.Button(self, text="SE CONNECTER", command=self._connecter,
-                  bg=C["or"], fg=C["blanc"], font=("Segoe UI", 11, "bold"),
+                  bg=C["or"], fg=C["blanc"], font=(FONT, 11, "bold"),
                   relief="flat", padx=24, pady=8, cursor="hand2",
                   activebackground="#B7950B").pack(pady=12)
 
         tk.Label(self, text="Compte par défaut : admin / admin123",
-                 font=("Segoe UI", 8), fg="#AED6F1", bg=C["bleu"]).pack()
+                 font=(FONT, 8), fg="#AED6F1", bg=C["bleu"]).pack()
 
     def _connecter(self):
+        global _TENTATIVES_CONNEXION
         login = self.v_login.get().strip()
         mdp   = self.v_mdp.get()
         if not login or not mdp:
             self.v_msg.set("Veuillez remplir tous les champs.")
             return
+        # Rate limiting
+        now = datetime.now().timestamp()
+        if login in _TENTATIVES_CONNEXION:
+            nb, debut = _TENTATIVES_CONNEXION[login]
+            if nb >= _MAX_TENTATIVES:
+                ecoule = now - debut
+                if ecoule < _LOCKOUT_SECONDS:
+                    restant = int(_LOCKOUT_SECONDS - ecoule)
+                    self.v_msg.set(f"Compte bloqué. Réessayez dans {restant}s.")
+                    return
+                else:
+                    _TENTATIVES_CONNEXION[login] = (0, now)
         if self.auth.connecter(login, mdp):
+            _TENTATIVES_CONNEXION.pop(login, None)
+            if mdp == MDP_DEFAUT:
+                # Sécurité : interdire l'usage permanent du mot de passe usine
+                self._forcer_changement_mdp(login, mdp)
+                return
             self.destroy()
             self.callback()
         else:
-            self.v_msg.set("Identifiant ou mot de passe incorrect.")
+            nb, debut = _TENTATIVES_CONNEXION.get(login, (0, now))
+            _TENTATIVES_CONNEXION[login] = (nb + 1, debut if nb > 0 else now)
+            reste = _MAX_TENTATIVES - nb - 1
+            if reste > 0:
+                self.v_msg.set(f"Identifiant ou mot de passe incorrect. ({reste} tentative(s) restante(s))")
+            else:
+                self.v_msg.set(f"Compte bloqué {_LOCKOUT_SECONDS}s après {_MAX_TENTATIVES} échecs.")
             self.v_mdp.set("")
+
+    def _forcer_changement_mdp(self, login, mdp_actuel):
+        """Dialogue modal non-fermable : le mot de passe usine doit être remplacé."""
+        self.withdraw()
+        dlg = tk.Toplevel(self)
+        dlg.title("Sécurité — Changement obligatoire")
+        dlg.resizable(False, False)
+        dlg.configure(bg=C["blanc"])
+        dlg.grab_set()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)   # Fermeture interdite
+        centrer(dlg, 420, 330)
+
+        tk.Label(dlg, text="⚠ Sécurité requise", font=(FONT, 13, "bold"),
+                 bg=C["blanc"], fg="#B7950B").pack(pady=(18, 2))
+        tk.Label(dlg, text="Vous utilisez encore le mot de passe par défaut.\n"
+                           "Choisissez un nouveau mot de passe pour continuer.",
+                 font=(FONT, 9), bg=C["blanc"], fg=C["gris"], justify="center").pack(pady=(0, 10))
+
+        frm = tk.Frame(dlg, bg=C["blanc"])
+        frm.pack(fill="x", padx=26)
+        frm.columnconfigure(1, weight=1)
+
+        vars_ = {}
+        for row, (lbl, cle) in enumerate([
+            ("Nouveau mot de passe",   "n"),
+            ("Confirmer le nouveau",   "c"),
+        ]):
+            tk.Label(frm, text=lbl, bg=C["blanc"], font=(FONT, 10)).grid(
+                row=row*2, column=0, columnspan=2, sticky="w", pady=(8, 1))
+            vars_[cle] = tk.StringVar()
+            ttk.Entry(frm, textvariable=vars_[cle], show="*", width=24).grid(
+                row=row*2+1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+
+        v_msg = tk.StringVar()
+        tk.Label(dlg, textvariable=v_msg, fg="#C0392B", bg=C["blanc"],
+                 font=(FONT, 9)).pack(pady=(6, 0))
+
+        def _valider():
+            n, c = vars_["n"].get(), vars_["c"].get()
+            if len(n) < 4:
+                v_msg.set("Le mot de passe doit contenir au moins 4 caractères.")
+                return
+            if n == MDP_DEFAUT:
+                v_msg.set("Le nouveau mot de passe ne peut pas être identique à l'ancien.")
+                return
+            if n != c:
+                v_msg.set("Les mots de passe ne correspondent pas.")
+                return
+            try:
+                self.auth.changer_mdp(login, mdp_actuel, n)
+                self.auth.connecter(login, n)      # Re-synchroniser la session
+                self.auth.db.audit(self.auth.uid, login, "MDP_INITIAL_CHANGE")
+                messagebox.showinfo(
+                    "Mot de passe modifié",
+                    "Votre mot de passe a été mis à jour.\nBienvenue dans AkibaCore !",
+                    parent=dlg)
+                dlg.destroy()
+                self.destroy()
+                self.callback()
+            except ValueError as e:
+                v_msg.set(str(e))
+
+        tk.Button(dlg, text="DÉFINIR LE NOUVEAU MOT DE PASSE", command=_valider,
+                  bg=C["or"], fg=C["blanc"], font=(FONT, 10, "bold"),
+                  relief="flat", padx=18, pady=7, cursor="hand2",
+                  activebackground="#B7950B").pack(pady=14)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -608,10 +1068,10 @@ class Dashboard(ttk.Frame):
         ttk.Label(hdr, text=f"Tableau de Bord — {APP_NOM}", style="Titre.TLabel").pack(side="left")
         btn(hdr, "Actualiser", self.actualiser, "Bleu.TButton").pack(side="right")
 
-        self.corps = ttk.Frame(self)
+        # Zone scrollable
+        self.corps = tk.Frame(self, bg=C["gris"])
         self.corps.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
-        for c in range(4):
-            self.corps.columnconfigure(c, weight=1)
+        self.corps.columnconfigure(0, weight=1)
         self.actualiser()
 
     def actualiser(self):
@@ -620,23 +1080,72 @@ class Dashboard(ttk.Frame):
         Finance.maj_statuts(self.db)
         s = self._stats()
 
-        cartes = [
-            ("Membres actifs",         str(s["membres"]),             C["bleu"]),
-            ("Total Épargnes (FC)",     f"{s['epargnes']:,.0f}",       C["vert"]),
-            ("Portefeuille Crédit (FC)",f"{s['credits_actifs']:,.0f}", "#7D6608"),
-            ("Total Remboursé (FC)",    f"{s['rembs']:,.0f}",          "#6C3483"),
-            ("Crédits en retard",       str(s["retards"]),             C["rouge"]),
-            ("Sessions ouvertes",       str(s["sessions"]),            "#1A5276"),
-            ("Solde net (FC)",          f"{s['solde']:,.0f}",          C["vert"] if s["solde"]>=0 else C["rouge"]),
-            ("Membres sans crédit",     str(s["sans_credit"]),         "#117A65"),
-        ]
-        for i, (titre, valeur, coul) in enumerate(cartes):
-            r, c = divmod(i, 4)
-            self._carte(titre, valeur, coul, r, c)
+        # ── Ligne 1 : KPI Cards ──
+        lbl_frame = tk.Frame(self.corps, bg=C["gris"])
+        lbl_frame.grid(row=0, column=0, sticky="ew")
+        for c in range(4):
+            lbl_frame.columnconfigure(c, weight=1)
 
-        # Journal récent
+        cartes = [
+            ("\u263A", "Membres actifs",         str(s["membres"]),             C["bleu"]),
+            ("\u25C7", "Épargnes totales (FC)",    f"{s['epargnes']:,.0f}",       C["vert"]),
+            ("\u25B6", "Portefeuille crédit (FC)", f"{s['credits_actifs']:,.0f}", "#7D6608"),
+            ("\u25C0", "Remboursé (FC)",           f"{s['rembs']:,.0f}",          "#6C3483"),
+            ("\u26A0", "Crédits en retard",        str(s["retards"]),             C["rouge"]),
+            ("\u25A0", "Sessions ouvertes",        str(s["sessions"]),            "#1A5276"),
+            ("\u25CF", "Solde net (FC)",           f"{s['solde']:,.0f}",
+             C["vert"] if s["solde"] >= 0 else C["rouge"]),
+            ("\u25CB", "Membres sans crédit",      str(s["sans_credit"]),         "#117A65"),
+        ]
+        for i, (icone, titre, valeur, coul) in enumerate(cartes):
+            r, c = divmod(i, 4)
+            self._carte(icone, titre, valeur, coul, lbl_frame, r, c)
+
+        # ── Ligne 2 : Graphiques ──
+        charts = tk.Frame(self.corps, bg=C["gris"])
+        charts.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        charts.columnconfigure(0, weight=1)
+        charts.columnconfigure(1, weight=1)
+
+        # Bar chart : épargnes vs crédit vs remboursé
+        bar_box = tk.Frame(charts, bg=C["blanc"], highlightbackground=C["gris_f"],
+                           highlightthickness=1)
+        bar_box.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
+        tk.Label(bar_box, text="Vue financière", bg=C["blanc"],
+                 fg=C["texte"], font=(FONT, 10, "bold"), anchor="w").pack(
+                     fill="x", padx=12, pady=(8, 0))
+        bar_canvas = tk.Canvas(bar_box, bg=C["blanc"], highlightthickness=0, height=190)
+        bar_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        ChartEngine.bar(bar_canvas, [
+            ("Épargnes",    s["epargnes"],       C["vert"]),
+            ("Crédit act.", s["credits_actifs"],  "#7D6608"),
+            ("Remboursé",   s["rembs"],           "#6C3483"),
+            ("Solde net",   max(s["solde"], 0),   C["bleu_clair"]),
+        ])
+
+        # Pie chart : répartition des crédits
+        pie_box = tk.Frame(charts, bg=C["blanc"], highlightbackground=C["gris_f"],
+                           highlightthickness=1)
+        pie_box.grid(row=0, column=1, padx=(6, 0), sticky="nsew")
+        tk.Label(pie_box, text="Statut des crédits", bg=C["blanc"],
+                 fg=C["texte"], font=(FONT, 10, "bold"), anchor="w").pack(
+                     fill="x", padx=12, pady=(8, 0))
+        credits_actifs = s["credits_actifs_count"]
+        nb_soldes = self.db.valeur(
+            "SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id"
+            " WHERE m.avec_id=? AND c.statut='solde'", (self.avec_id,)) or 0
+        nb_retards = s["retards"]
+        pie_canvas = tk.Canvas(pie_box, bg=C["blanc"], highlightthickness=0, height=190)
+        pie_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        ChartEngine.pie(pie_canvas, [
+            ("Actifs",  credits_actifs, C["bleu_clair"]),
+            ("Retard",  nb_retards,     C["rouge"]),
+            ("Soldés",  nb_soldes,      C["vert"]),
+        ])
+
+        # ── Ligne 3 : Journal ──
         jf = ttk.LabelFrame(self.corps, text="Journal des 20 dernières actions", padding=6)
-        jf.grid(row=2, column=0, columnspan=4, sticky="ew", padx=4, pady=(12, 4))
+        jf.grid(row=2, column=0, sticky="ew", padx=0, pady=(12, 4))
         cols = ("Horodatage", "Utilisateur", "Action", "Détails")
         tv, f = treeview(jf, cols, [130, 100, 120, 400])
         f.pack(fill="both", expand=True)
@@ -647,13 +1156,15 @@ class Dashboard(ttk.Frame):
             tv.insert("", "end", values=(l["ts"], l["login"] or "—",
                                          l["action"], l["details"] or ""), tags=(tag,))
 
-    def _carte(self, titre, valeur, couleur, row, col):
-        c = tk.Frame(self.corps, bg=couleur)
+    def _carte(self, icone, titre, valeur, couleur, parent, row, col):
+        c = tk.Frame(parent, bg=couleur)
         c.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-        tk.Label(c, text=valeur, font=("Segoe UI", 17, "bold"),
-                 bg=couleur, fg=C["blanc"]).pack(padx=14, pady=(14, 2))
-        tk.Label(c, text=titre, font=("Segoe UI", 9),
-                 bg=couleur, fg=C["blanc"]).pack(padx=14, pady=(0, 14))
+        tk.Label(c, text=icone, font=(FONT, 14),
+                 bg=couleur, fg=C["blanc"]).pack(padx=14, pady=(10, 0))
+        tk.Label(c, text=valeur, font=(FONT, 17, "bold"),
+                 bg=couleur, fg=C["blanc"]).pack(padx=14, pady=(2, 2))
+        tk.Label(c, text=titre, font=(FONT, 9),
+                 bg=couleur, fg=C["blanc"]).pack(padx=14, pady=(0, 10))
 
     def _stats(self):
         db, aid = self.db, self.avec_id
@@ -666,6 +1177,9 @@ class Dashboard(ttk.Frame):
             "SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit c"
             " JOIN membre m ON c.membre_id=m.id"
             " WHERE m.avec_id=? AND c.statut IN ('actif','en_retard')", (aid,)) or 0
+        credits_actifs_count = db.valeur(
+            "SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id"
+            " WHERE m.avec_id=? AND c.statut='actif'", (aid,)) or 0
         rembs = db.valeur(
             "SELECT COALESCE(SUM(r.montant_total),0) FROM remboursement r"
             " JOIN membre m ON r.membre_id=m.id WHERE m.avec_id=? AND r.annule=0", (aid,)) or 0
@@ -679,6 +1193,7 @@ class Dashboard(ttk.Frame):
             " AND id NOT IN (SELECT DISTINCT membre_id FROM credit WHERE statut IN ('actif','en_retard'))",
             (aid,)) or 0
         return dict(membres=membres, epargnes=epargnes, credits_actifs=credits_a,
+                    credits_actifs_count=credits_actifs_count,
                     rembs=rembs, retards=retards, sessions=sessions,
                     solde=epargnes - credits_a, sans_credit=sans_c)
 
@@ -706,6 +1221,8 @@ class OngletMembres(ttk.Frame):
             ("Détail",     self.detail,   "TButton"),
             ("Actualiser", self.actualiser,"TButton"),
         ]:
+            if self.auth.user["role"] == "lecteur" and txt not in ("Détail", "Actualiser"):
+                continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
         # Recherche
@@ -727,7 +1244,7 @@ class OngletMembres(ttk.Frame):
         # Résumé
         self.v_res = tk.StringVar()
         ttk.Label(self, textvariable=self.v_res,
-                  font=("Segoe UI", 10, "bold")).grid(row=3, column=0, pady=6)
+                  font=(FONT, 10, "bold")).grid(row=3, column=0, pady=6)
 
     def actualiser(self):
         for it in self.tv.get_children():
@@ -901,13 +1418,13 @@ class DlgDetailMembre(tk.Toplevel):
             ("Statut",         (self.m.get("statut") or "").upper()),
             ("Notes",          self.m.get("notes") or "—"),
         ]):
-            ttk.Label(fi, text=f"{lbl} :", font=("Segoe UI", 10, "bold"), background=C["gris"]).grid(
+            ttk.Label(fi, text=f"{lbl} :", font=(FONT, 10, "bold"), background=C["gris"]).grid(
                 row=r, column=0, sticky="e", padx=(0, 14), pady=4)
             ttk.Label(fi, text=val).grid(row=r, column=1, sticky="w", pady=4)
 
         epargne_totale = Finance.solde_epargne(self.db, self.m["id"])
         ttk.Label(fi, text=f"Épargne totale : {epargne_totale:,.0f} FC",
-                  font=("Segoe UI", 12, "bold"), foreground=C["vert"],
+                  font=(FONT, 12, "bold"), foreground=C["vert"],
                   background=C["gris"]).grid(row=9, column=0, columnspan=2, pady=10)
 
         # ─ Épargnes ─
@@ -917,12 +1434,12 @@ class DlgDetailMembre(tk.Toplevel):
         tv_e, frm_e = treeview(fe, cols, [140, 90, 110, 250, 70])
         frm_e.pack(fill="both", expand=True, padx=4, pady=4)
         eps = self.db.tous(
-            "SELECT date_op,type,montant,description,annule FROM epargne"
+            "SELECT date_op,type,montant,description FROM epargne"
             " WHERE membre_id=? AND annule=0 ORDER BY date_op DESC", (self.m["id"],))
         for i, e in enumerate(eps):
             tv_e.insert("", "end", tags=("p" if i%2==0 else "i",), values=(
                 e["date_op"], e["type"], f"{e['montant']:,.0f}",
-                e["description"] or "", "ANNULÉ" if e["annule"] else "✓"))
+                e["description"] or "", "✓"))
 
         # ─ Crédits ─
         fc = ttk.Frame(nb)
@@ -963,6 +1480,8 @@ class OngletEpargnes(ttk.Frame):
             ("Annuler opération",   self.annuler,  "Rouge.TButton"),
             ("Actualiser",          self.actualiser,"TButton"),
         ]:
+            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+                continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
         cols = ("ID","Date","Membre","Type","Montant FC","Description","Statut")
@@ -972,7 +1491,7 @@ class OngletEpargnes(ttk.Frame):
 
         self.v_res = tk.StringVar()
         ttk.Label(self, textvariable=self.v_res,
-                  font=("Segoe UI", 10, "bold")).grid(row=2, column=0, pady=6)
+                  font=(FONT, 10, "bold")).grid(row=2, column=0, pady=6)
 
     def actualiser(self):
         for it in self.tv.get_children():
@@ -1095,6 +1614,8 @@ class OngletCredits(ttk.Frame):
             ("+ Octroyer crédit", self.ajouter,   "Vert.TButton"),
             ("Actualiser",        self.actualiser, "TButton"),
         ]:
+            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+                continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
         cols = ("ID","Membre","Principal FC","Intérêt FC","Total dû FC",
@@ -1105,7 +1626,7 @@ class OngletCredits(ttk.Frame):
 
         self.v_res = tk.StringVar()
         ttk.Label(self, textvariable=self.v_res,
-                  font=("Segoe UI", 10, "bold")).grid(row=2, column=0, pady=6)
+                  font=(FONT, 10, "bold")).grid(row=2, column=0, pady=6)
 
     def actualiser(self):
         Finance.maj_statuts(self.db)
@@ -1176,7 +1697,7 @@ class DlgCredit(tk.Toplevel):
         # Aperçu
         self.v_ap = tk.StringVar()
         ttk.Label(frm, textvariable=self.v_ap, foreground=C["bleu"],
-                  font=("Segoe UI", 10, "italic"), background=C["gris"]).grid(
+                  font=(FONT, 10, "italic"), background=C["gris"]).grid(
             row=7, column=0, columnspan=2, pady=4)
         for v in (self.v_p, self.v_t, self.v_d):
             v.trace("w", lambda *a: self._apercu())
@@ -1215,15 +1736,15 @@ class DlgCredit(tk.Toplevel):
             total = round(p + inter, 2)
             ech   = Finance.date_echeance(do, dur)
 
-            # Vérifier que le membre n'a pas déjà un crédit actif trop élevé
+            # Vérifier que le membre n'a pas déjà un crédit actif (blocage dur)
             solde_actuel = self.db.valeur(
                 "SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit"
                 " WHERE membre_id=? AND statut IN ('actif','en_retard')", (mid,)) or 0
             if solde_actuel > 0:
-                if not messagebox.askyesno("Attention",
+                raise ValueError(
+                    f"Impossible d'octroyer un nouveau crédit.\n"
                     f"Ce membre a déjà {solde_actuel:,.0f} FC de crédit actif.\n"
-                    "Confirmer l'octroi d'un nouveau crédit ?", parent=self):
-                    return
+                    "Le crédit actuel doit être soldé avant d'en obtenir un nouveau.")
 
             cur = self.db.exec("""
                 INSERT INTO credit(membre_id,principal,taux,duree_mois,date_octroi,date_echeance,
@@ -1266,6 +1787,8 @@ class OngletRemboursements(ttk.Frame):
             ("+ Enregistrer paiement", self.ajouter,   "Vert.TButton"),
             ("Actualiser",             self.actualiser, "TButton"),
         ]:
+            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+                continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
         cols = ("ID","Date","Membre","Crédit#","Principal FC","Intérêt FC",
@@ -1276,7 +1799,7 @@ class OngletRemboursements(ttk.Frame):
 
         self.v_res = tk.StringVar()
         ttk.Label(self, textvariable=self.v_res,
-                  font=("Segoe UI", 10, "bold")).grid(row=2, column=0, pady=6)
+                  font=(FONT, 10, "bold")).grid(row=2, column=0, pady=6)
 
     def actualiser(self):
         for it in self.tv.get_children():
@@ -1347,7 +1870,7 @@ class DlgRemboursement(tk.Toplevel):
         # Détail crédit
         self.v_det = tk.StringVar()
         ttk.Label(frm, textvariable=self.v_det, foreground=C["bleu"],
-                  font=("Segoe UI", 9, "italic"), background=C["gris"]).grid(
+                  font=(FONT, 9, "italic"), background=C["gris"]).grid(
             row=3, column=0, columnspan=2, pady=2)
 
         self.v_mt, _  = champ(frm, "Montant payé (FC) *", 4)
@@ -1357,7 +1880,7 @@ class DlgRemboursement(tk.Toplevel):
         # Pénalité
         self.v_pen = tk.StringVar()
         ttk.Label(frm, textvariable=self.v_pen, foreground=C["rouge"],
-                  font=("Segoe UI", 10, "bold"), background=C["gris"]).grid(
+                  font=(FONT, 10, "bold"), background=C["gris"]).grid(
             row=7, column=0, columnspan=2, pady=4)
 
         bf = ttk.Frame(frm)
@@ -1420,10 +1943,18 @@ class DlgRemboursement(tk.Toplevel):
             jr  = Finance.jours_retard(c["date_echeance"])
             pen = Finance.penalite(solde, TAUX_PENALITE_DEFAUT, jr) if jr > 0 else 0
 
-            # Imputation : pénalité → intérêt → principal
+            # Imputation : pénalité → intérêt → principal (basé sur montants restants)
             pen_pay  = min(pen, mt)
             reste    = mt - pen_pay
-            ratio_i  = c["montant_interet"] / c["montant_total"] if c["montant_total"] > 0 else 0
+            # Calculer les intérêts et principal restants à payer
+            ratio_total = c["montant_total"] if c["montant_total"] > 0 else 1
+            interet_restant = max(0, c["montant_interet"] * (1 - c["rembourse"] / ratio_total))
+            principal_restant = max(0, c["montant_total"] - c["rembourse"] - interet_restant)
+            total_restant = interet_restant + principal_restant
+            if total_restant > 0:
+                ratio_i = interet_restant / total_restant
+            else:
+                ratio_i = 0
             int_pay  = round(reste * ratio_i, 2)
             prin_pay = round(reste - int_pay, 2)
 
@@ -1482,6 +2013,8 @@ class OngletSessions(ttk.Frame):
             ("Clôturer session",   self.cloturer,  "Rouge.TButton"),
             ("Actualiser",         self.actualiser, "TButton"),
         ]:
+            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+                continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
         cols = ("ID","N° Session","Date réunion","Statut","Notes","Créée par","Créée le")
@@ -1530,6 +2063,11 @@ class OngletSessions(ttk.Frame):
         s = self.tv.focus()
         if not s:
             messagebox.showwarning("Sélection", "Sélectionnez une session."); return
+        session = self.db.un("SELECT statut FROM session WHERE id=?", (int(s),))
+        if not session:
+            messagebox.showerror("Erreur", "Session introuvable."); return
+        if session["statut"] != "ouverte":
+            messagebox.showwarning("Clôture", "Cette session est déjà fermée."); return
         if not messagebox.askyesno("Confirmer", "Clôturer cette session ?", parent=self):
             return
         self.db.exec("UPDATE session SET statut='fermee' WHERE id=?", (int(s),))
@@ -1569,6 +2107,8 @@ class OngletRapports(ttk.Frame):
             ("Sauvegarde base de données",self._sauver,       "Vert.TButton"),
         ]
         for i, (lbl, cmd, st) in enumerate(actions):
+            if lbl == "Sauvegarde base de données" and self.auth.user["role"] == "lecteur":
+                continue
             r, c = divmod(i, 3)
             btn(grille, lbl, cmd, st, l=22).grid(row=r, column=c, padx=8, pady=8, sticky="ew")
 
@@ -1590,9 +2130,13 @@ class OngletRapports(ttk.Frame):
         pf_actif  = db.valeur("SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut IN ('actif','en_retard')", (aid,)) or 0
         rembs     = db.valeur("SELECT COALESCE(SUM(r.montant_total),0) FROM remboursement r JOIN membre m ON r.membre_id=m.id WHERE m.avec_id=? AND r.annule=0", (aid,)) or 0
         retards   = db.valeur("SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut='en_retard'", (aid,)) or 0
+        cr_actifs = db.valeur("SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut='actif'", (aid,)) or 0
+        cr_soldes = db.valeur("SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut='solde'", (aid,)) or 0
         sessions  = db.valeur("SELECT COUNT(*) FROM session WHERE avec_id=?", (aid,)) or 0
         return dict(membres=membres, ep=ep, cr_p=cr_p, cr_i=cr_i,
-                    pf_actif=pf_actif, rembs=rembs, retards=retards, sessions=sessions)
+                    pf_actif=pf_actif, rembs=rembs, retards=retards,
+                    cr_actifs=cr_actifs, cr_soldes=cr_soldes,
+                    sessions=sessions)
 
     def _bilan(self):
         s = self._get_stats()
@@ -1751,6 +2295,18 @@ class OngletRapports(ttk.Frame):
                     f"<td>{solde_cr:,.0f}</td><td>{ech}</td>"
                     f"<td>{jr}j</td></tr>")
 
+        svg_bar = ChartEngine.svg_bar([
+            ("Épargnes", s["ep"], "#1E8449"),
+            ("Crédit actif", s["pf_actif"], "#7D6608"),
+            ("Remboursé", s["rembs"], "#6C3483"),
+            ("Solde net", max(solde, 0), "#2980B9"),
+        ])
+        svg_pie = ChartEngine.svg_pie([
+            ("Actifs", s.get("cr_actifs", 0), "#2980B9"),
+            ("Retard", s["retards"], "#C0392B"),
+            ("Soldés", s.get("cr_soldes", 0), "#1E8449"),
+        ])
+
         rapport = f"""<!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8">
 <title>Rapport {APP_NOM}</title>
@@ -1762,6 +2318,9 @@ class OngletRapports(ttk.Frame):
   .k{{background:#1A5276;color:#fff;padding:14px 20px;border-radius:6px;min-width:160px;text-align:center}}
   .k .v{{font-size:1.5em;font-weight:700}}
   .k .l{{font-size:.85em;opacity:.85}}
+  .charts{{display:flex;gap:20px;margin:20px 0;flex-wrap:wrap}}
+  .chart-box{{flex:1;min-width:320px;background:#fff;border:1px solid #D5D8DC;border-radius:8px;padding:16px;text-align:center}}
+  .chart-box h3{{margin:0 0 8px 0;color:#1A5276;font-size:1em}}
   .alerte{{background:#FADBD8!important}}
   table{{border-collapse:collapse;width:100%;margin:10px 0}}
   th{{background:#1A5276;color:#fff;padding:8px 12px;text-align:left;font-size:.9em}}
@@ -1780,6 +2339,10 @@ class OngletRapports(ttk.Frame):
     <div class="v">{s['retards']}</div><div class="l">Crédits en retard</div></div>
   <div class="k" style="background:{'#1E8449' if solde>=0 else '#C0392B'}">
     <div class="v">{solde:,.0f}</div><div class="l">Solde net FC</div></div>
+</div>
+<div class="charts">
+  <div class="chart-box"><h3>Vue financière</h3>{svg_bar}</div>
+  <div class="chart-box"><h3>Statut des crédits</h3>{svg_pie}</div>
 </div>
 <h2>Liste des membres</h2>
 <table><tr><th>Nom complet</th><th>Téléphone</th><th>Statut</th><th>Épargne FC</th></tr>
@@ -1833,13 +2396,54 @@ class AkibaCore(tk.Tk):
                 self.geometry("1200x700")
 
         appliquer_styles(self)
-        self.db   = DB()
+        self.db = self._ouvrir_base_securisee()
+        if self.db is None:
+            self.destroy()
+            return
         self.auth = Auth(self.db)
         self.bkp  = Backup()
         self._backup_after_id = None
 
         self.protocol("WM_DELETE_WINDOW", self._quitter)
         self._lancer_connexion()
+
+    def _ouvrir_base_securisee(self):
+        """Ouvre la base ; en cas de corruption, propose une restauration propre.
+
+        Retourne une instance DB fonctionnelle, ou None (application fermée).
+        Ne détruit jamais les données sans accord explicite de l'utilisateur.
+        """
+        try:
+            return DB()
+        except sqlite3.DatabaseError:
+            dernier = Backup.derniere_sauvegarde()
+            if dernier:
+                date_bkp = datetime.fromtimestamp(
+                    os.path.getmtime(dernier)).strftime("%d/%m/%Y à %H:%M")
+                reponse = messagebox.askyesno(
+                    "Base de données endommagée",
+                    "Le fichier akibacore.db est illisible ou corrompu.\n\n"
+                    f"Une sauvegarde du {date_bkp} est disponible.\n"
+                    "Voulez-vous la restaurer maintenant ?\n\n"
+                    "(La base actuelle sera remplacée par cette sauvegarde.)")
+            else:
+                reponse = False
+            if reponse:
+                try:
+                    Backup.restaurer()
+                    return DB()
+                except Exception:
+                    pass
+            messagebox.showerror(
+                "AkibaCore — Impossible de démarrer",
+                "La base de données est corrompue et aucune restauration "
+                "n'a été effectuée.\n\n"
+                "Pour récupérer vos données manuellement :\n"
+                "1. Fermez cette fenêtre.\n"
+                "2. Ouvrez le dossier 'sauvegardes'.\n"
+                "3. Copiez la sauvegarde la plus récente et renommez-la "
+                "'akibacore.db' dans le dossier de l'application.")
+            return None
 
     # ── Flux connexion ────────────────────────────────────────────
     def _lancer_connexion(self):
@@ -1862,29 +2466,34 @@ class AkibaCore(tk.Tk):
         top.pack_propagate(False)
         tk.Label(top, text=f"  {APP_NOM}  v{APP_VERSION}",
                  fg=C["blanc"], bg=C["bleu"],
-                 font=("Segoe UI", 12, "bold")).pack(side="left", pady=7)
+                 font=(FONT, 12, "bold")).pack(side="left", pady=7)
         u = self.auth.user
         tk.Label(top,
                  text=f"{u['nom']}  |  {u['role'].upper()}  |  {date.today().strftime('%d/%m/%Y')}   ",
-                 fg="#AED6F1", bg=C["bleu"], font=("Segoe UI", 9)).pack(side="right", pady=10)
+                 fg="#AED6F1", bg=C["bleu"], font=(FONT, 9)).pack(side="right", pady=10)
 
-        # ─ Notebook ─
+        # ─ Barre latérale + zone de contenu ─
         self.avec_id = 1
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=4, pady=4)
-
-        onglets = [
-            ("  Tableau de Bord  ", Dashboard),
-            ("  Membres  ",         OngletMembres),
-            ("  Épargnes  ",        OngletEpargnes),
-            ("  Crédits  ",         OngletCredits),
-            ("  Remboursements  ",  OngletRemboursements),
-            ("  Sessions  ",        OngletSessions),
-            ("  Rapports & Export  ",OngletRapports),
+        self._onglets_defs = [
+            ("Tableau de Bord", "\u2302",  Dashboard),
+            ("Membres",         "\u263A",  OngletMembres),
+            ("Épargnes",        "\u25C7",  OngletEpargnes),
+            ("Crédits",         "\u25B6",  OngletCredits),
+            ("Remboursements",  "\u25C0",  OngletRemboursements),
+            ("Sessions",        "\u25A0",  OngletSessions),
+            ("Rapports",        "\u25CF",  OngletRapports),
         ]
-        for nom, Cls in onglets:
-            f = Cls(nb, self.db, self.auth, self.avec_id)
-            nb.add(f, text=nom)
+        mid = tk.Frame(self, bg=C["gris"])
+        mid.pack(fill="both", expand=True)
+
+        items_nav = [(n, ic) for n, ic, _ in self._onglets_defs]
+        # Conteneur créé AVANT la sidebar : selectionner(0) appelle
+        # immédiatement _naviguer() qui en a besoin.
+        self._conteneur = tk.Frame(mid, bg=C["gris"])
+        self._sidebar = Sidebar(mid, items_nav, self._naviguer)
+        self._sidebar.pack(side="left", fill="y")
+        self._conteneur.pack(side="left", fill="both", expand=True)
+        self._sidebar.selectionner(0)
 
         # ─ Barre inférieure ─
         bas = tk.Frame(self, bg=C["gris_f"], height=26)
@@ -1892,12 +2501,20 @@ class AkibaCore(tk.Tk):
         bas.pack_propagate(False)
         self.v_statut = tk.StringVar(value="Prêt.")
         tk.Label(bas, textvariable=self.v_statut,
-                 bg=C["gris_f"], font=("Segoe UI", 9)).pack(side="left", padx=10, pady=4)
+                 bg=C["gris_f"], font=(FONT, 9)).pack(side="left", padx=10, pady=4)
         for lbl, cmd in [("Changer mot de passe", self._changer_mdp),
                           ("Se déconnecter",       self._deconnecter)]:
             tk.Button(bas, text=lbl, command=cmd, relief="flat",
-                      bg=C["gris_f"], font=("Segoe UI", 9),
-                      cursor="hand2").pack(side="right", padx=10, pady=4)
+                      bg=C["gris_f"], font=(FONT, 9),
+                       cursor="hand2").pack(side="right", padx=10, pady=4)
+
+    def _naviguer(self, index):
+        """Charge l'onglet correspondant dans la zone de contenu."""
+        for w in self._conteneur.winfo_children():
+            w.destroy()
+        _, _, Cls = self._onglets_defs[index]
+        page = Cls(self._conteneur, self.db, self.auth, self.avec_id)
+        page.pack(fill="both", expand=True)
 
     def _auto_backup(self):
         try:

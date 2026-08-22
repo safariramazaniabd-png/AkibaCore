@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AkibaCore
+GenericName=Gestion AVEC
+Comment=Système de gestion des Associations Villageoises d'Épargne et de Crédit
+Exec=lancer_akibacore.sh
+Path=
+Icon=icone_akibacore.png
+Terminal=false
+Categories=Office;Finance;Database;
+Keywords=avec;epargne;credit;microfinance;tontine;
+StartupNotify=true

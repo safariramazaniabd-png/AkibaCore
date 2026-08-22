@@ -5,7 +5,7 @@ from datetime import date
 import sys, os, hashlib, secrets, tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
-from main import Finance, DB, Auth, TAUX_PENALITE_DEFAUT
+from main import Finance, DB, Auth, TAUX_PENALITE_DEFAUT, ChartEngine
 
 
 # ════════════════════════════════════════════════════════════════
@@ -425,6 +425,48 @@ class TestMetierRemboursement(unittest.TestCase):
         c = self.db.un("SELECT statut FROM credit WHERE membre_id=? AND montant_total=52500",
                        (self.mid,))
         self.assertEqual(c["statut"], "en_retard")
+
+
+# ════════════════════════════════════════════════════════════════
+#  CHARTENGINE (SVG helpers)
+# ════════════════════════════════════════════════════════════════
+
+class TestSVGBar(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(ChartEngine.svg_bar([]), "")
+
+    def test_contains_svg_tag(self):
+        svg = ChartEngine.svg_bar([("A", 10, "#f00"), ("B", 20, "#0f0")])
+        self.assertIn("<svg", svg)
+        self.assertIn("</svg>", svg)
+
+    def test_one_bar(self):
+        svg = ChartEngine.svg_bar([("X", 42, "#1A5276")])
+        self.assertIn("42", svg)
+        self.assertIn("#1A5276", svg)
+        self.assertIn("X", svg)
+
+    def test_max_value_zero(self):
+        svg = ChartEngine.svg_bar([("A", 0, "#000")])
+        self.assertIn("<svg", svg)
+
+
+class TestSVGPie(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(ChartEngine.svg_pie([]), "")
+
+    def test_all_zero(self):
+        self.assertEqual(ChartEngine.svg_pie([("A", 0, "#000")]), "")
+
+    def test_single_slice(self):
+        svg = ChartEngine.svg_pie([("Actifs", 10, "#2980B9")])
+        self.assertIn("<svg", svg)
+        self.assertIn("100%", svg)
+
+    def test_two_slices(self):
+        svg = ChartEngine.svg_pie([("A", 30, "#f00"), ("B", 70, "#0f0")])
+        self.assertIn("30%", svg)
+        self.assertIn("70%", svg)
 
 
 if __name__ == "__main__":
