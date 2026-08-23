@@ -2585,5 +2585,37 @@ class AkibaCore(tk.Tk):
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    app = AkibaCore()
-    app.mainloop()
+    try:
+        app = AkibaCore()
+        app.mainloop()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        # Un échec au démarrage ne doit JAMAIS être silencieux :
+        # trace écrite dans erreur_demarrage.log + boîte de dialogue.
+        import traceback
+        try:
+            journal = REPERTOIRE_APP / "erreur_demarrage.log"
+            with open(journal, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            journal = None
+        try:
+            r = tkinter.Tk()
+            r.withdraw()
+            msg = (
+                "AkibaCore n'a pas pu démarrer.\n\n"
+                f"Erreur : {type(exc).__name__}: {exc}\n\n"
+                "Vérifiez :\n"
+                "  • que le dossier du programme est accessible en écriture ;\n"
+                "  • qu'aucune autre instance n'est déjà ouverte.\n"
+            )
+            if journal is not None:
+                msg += f"\nDétails techniques enregistrés dans :\n{journal}"
+            tkinter.messagebox.showerror("AkibaCore — Erreur de démarrage", msg)
+            r.destroy()
+        except Exception:
+            pass
+        raise
