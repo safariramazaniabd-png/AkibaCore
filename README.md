@@ -58,16 +58,16 @@ sudo apt install python3 python3-tk     # si pas déjà installé
 ./lancer_akibacore.sh                   # ou : python3 main.py
 ```
 
-### Raccourci dans le menu (optionnel)
+### Raccourci dans le menu et sur le Bureau (optionnel)
 
-Copiez `akibacore.desktop` et `icone_akibacore.png` vers :
+Lancez simplement :
 
 ```bash
-mkdir -p ~/.local/share/applications ~/.local/share/icons
-cp akibacore.desktop ~/.local/share/applications/
-cp icone_akibacore.png ~/.local/share/icons/
-# Éditez ensuite Exec= et Path= pour pointer vers votre dossier
+./installer_raccourci.sh
 ```
+
+Le raccourci « AkibaCore » est créé automatiquement dans le menu des
+applications et sur le Bureau, avec l'icône et les bons chemins.
 
 ---
 

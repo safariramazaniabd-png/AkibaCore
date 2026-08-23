@@ -1,15 +1,12 @@
-# Modèle de raccourci — NE PAS UTILISER DIRECTEMENT.
-# Pour installer un vrai raccourci fonctionnel (chemins absolus), lancez :
-#     ./installer_raccourci.sh
 [Desktop Entry]
 Type=Application
 Version=1.0
 Name=AkibaCore
 GenericName=Gestion AVEC
 Comment=Système de gestion des Associations Villageoises d'Épargne et de Crédit
-Exec=/CHEMIN/VERS/lancer_akibacore.sh
-Path=/CHEMIN/VERS
-Icon=icone_akibacore
+Exec=/home/abdallahx/Bureau/ABDALLAH/AkibaCore/lancer_akibacore.sh
+Path=/home/abdallahx/Bureau/ABDALLAH/AkibaCore
+Icon=/home/abdallahx/.local/share/icons/icone_akibacore.png
 Terminal=false
 Categories=Office;Finance;Database;
 Keywords=avec;epargne;credit;microfinance;tontine;
