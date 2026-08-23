@@ -229,3 +229,11 @@ AkibaCore app.exe/
 
 # Fichiers de sauvegarde editeur
 *.bak
+
+# Exports generes par les tests / l application
+/audit.csv
+/credits.csv
+/epargnes.csv
+/membres.csv
+/retards.csv
+/rapport_*.html
