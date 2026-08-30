@@ -2,6 +2,7 @@
 REM ============================================================
 REM  AkibaCore v2.2.0 - Script de lancement (Windows 10/11)
 REM  Double-cliquer sur ce fichier pour lancer l'application.
+REM  L'application se trouve dans le dossier PARENT (projet).
 REM ============================================================
 
 cd /d "%~dp0"
@@ -13,9 +14,9 @@ echo   ==============================================
 echo.
 
 REM Priorite a l'executable autonome s'il est present
-if exist "%~dp0AkibaCore.exe" (
+if exist "%~dp0..\AkibaCore.exe" (
     echo   Lancement de l'application...
-    start "" "%~dp0AkibaCore.exe"
+    start "" "%~dp0..\AkibaCore.exe"
     exit /b 0
 )
 
@@ -37,11 +38,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "%~dp0main.py" (
-    echo   ERREUR : main.py introuvable dans %~dp0
+if not exist "%~dp0..\main.py" (
+    echo   ERREUR : main.py introuvable dans %~dp0..
     pause
     exit /b 1
 )
 
 echo   Lancement...
-start "" pythonw "%~dp0main.py"
+start "" pythonw "%~dp0..\main.py"

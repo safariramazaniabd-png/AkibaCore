@@ -28,17 +28,23 @@
 
 ### Nouveautés
 
+- **Type de compte du membre à l'ajout.** La fenêtre « Ajouter un membre »
+  demande désormais le **type de compte** (épargne, courant, bloqué,
+  crédit). La valeur est stockée dans `membre.type_compte` (informatif)
+  et affichée dans le dossier du membre. Migration `user_version` 2 → 3
+  (colonne ajoutée sur les bases existantes, défaut `epargne`, aucune
+  donnée perdue).
 - L'icône d'application `AkibaCore.ico` est référencée dans la
   configuration PyInstaller (exécutable Windows).
 - Script de création de la **version portable Windows**
-  (`creer_portable_windows.bat` → `AkibaCore_Portable_v2.2.0_Windows.zip`).
+  (`setup_windows/creer_portable_windows.bat` → `AkibaCore_Portable_v2.2.0_Windows.zip`).
 - Script d'**installateur Windows** Inno Setup
-  (`AkibaCore_installer.iss` → `AkibaCore_Setup_v2.2.0_Windows_x64.exe`).
+  (`setup_windows/AkibaCore_installer.iss` → `AkibaCore_Setup_v2.2.0_Windows_x64.exe`).
 - La CI exécute désormais la suite de tests complète avant compilation.
 
 ### Tests
 
-- Ajout de la suite `test_administration.py` (28 tests) couvrant la
+- Ajout de la suite `test_administration.py` (32 tests) couvrant la
   cause racine de la page blanche, la navigation filtrée, la gestion
   des utilisateurs/rôles/permissions, la séparation des devises, les
   comptes membres, le snapshot des taux et la portabilité du dossier
@@ -46,7 +52,7 @@
 - Ajout de `test_scenario.py` : scénario utilisateur réel de bout en
   bout hors ligne (épargne → reçu → crédit → remboursement → comptes →
   rapport → sauvegarde → restauration).
-- **Total : 272 tests verts.**
+- **Total : 276 tests verts.**
 
 ## [2.1.0] — 2026-08 (résumé)
 

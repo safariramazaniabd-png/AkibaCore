@@ -44,13 +44,14 @@ sous Windows ou Linux.
 
 ### Option A — Version autonome recommandée
 
-1. Copiez le dossier livré (contenant `AkibaCore` et `lancer_akibacore.sh`)
-   où vous voulez, par exemple dans votre dossier personnel.
+1. Copiez le dossier livré (contenant `AkibaCore` et
+   `setup_linux/lancer_akibacore.sh`) où vous voulez, par exemple dans
+   votre dossier personnel.
 2. Ouvrez un terminal dans ce dossier et tapez :
 
 ```bash
-chmod +x AkibaCore lancer_akibacore.sh
-./lancer_akibacore.sh
+chmod +x AkibaCore setup_linux/lancer_akibacore.sh
+./setup_linux/lancer_akibacore.sh
 ```
 
 C'est tout. Aucune installation supplémentaire n'est nécessaire.
@@ -59,7 +60,7 @@ C'est tout. Aucune installation supplémentaire n'est nécessaire.
 
 ```bash
 sudo apt install python3 python3-tk     # si pas déjà installé
-./lancer_akibacore.sh                   # ou : python3 main.py
+./setup_linux/lancer_akibacore.sh       # ou : python3 main.py
 ```
 
 ### Raccourci dans le menu et sur le Bureau (optionnel)
@@ -67,7 +68,7 @@ sudo apt install python3 python3-tk     # si pas déjà installé
 Lancez simplement :
 
 ```bash
-./installer_raccourci.sh
+./setup_linux/installer_raccourci.sh
 ```
 
 Le raccourci « AkibaCore » est créé automatiquement dans le menu des
@@ -89,10 +90,10 @@ Si Windows affiche un avertissement SmartScreen, cliquez
 
 1. Installez Python depuis https://www.python.org/downloads/
    **en cochant « Add Python to PATH »** et « tcl/tk and IDLE ».
-2. Double-cliquez sur `lancer_akibacore.bat` (ou clic droit → Exécuter).
+2. Double-cliquez sur `setup_windows/lancer_akibacore.bat` (ou clic droit → Exécuter).
 
-Pour créer vous-même l'exécutable `.exe`, voir `windows/README.md`
-ou lancez `build_windows.bat`.
+Pour créer vous-même l'exécutable `.exe`, voir `GUIDE_INSTALLATION_WINDOWS.md`
+ou lancez `setup_windows/build_windows.bat`.
 
 ---
 
@@ -357,7 +358,7 @@ La désinstallation ne touche à rien d'autre sur l'ordinateur.
 |---|---|
 | Langage | Python ≥ 3.8, bibliothèque standard uniquement |
 | Interface | Tkinter (inclus avec Python) |
-| Base de données | SQLite mode WAL, clés étrangères activées, migrations `PRAGMA user_version` (0→2), 19 tables |
+| Base de données | SQLite mode WAL, clés étrangères activées, migrations `PRAGMA user_version` (0→3), 19 tables |
 | Impression | Imprimantes du système (Linux CUPS `lp`/`lpr`, Windows `startfile print`) + PDF hors ligne sans dépendance |
 | Génération de documents | DOCX / ODT / HTML / TXT traités localement (aucune bibliothèque externe) |
 | Dépendances externes | **Aucune** — fonctionne sans Internet, sans pip |
@@ -374,7 +375,7 @@ Tables : `utilisateur`, `avec`, `membre`, `session`, `epargne`,
 
 ## 21. Tests
 
-Le logiciel est livré avec **272 tests automatisés** (unitaires et
+Le logiciel est livré avec **276 tests automatisés** (unitaires et
 métier), tous passants :
 
 ```bash
@@ -383,8 +384,8 @@ python3 test_complet.py      # 132 tests — scénarios complets, sécurité, sa
 python3 test_permissions.py  #  19 tests — permissions, rôles, migration v2.0 → v2.2
 python3 test_recus.py        #  15 tests — numérotation des reçus, tickets, PDF
 python3 test_modeles.py      #  16 tests — modèles DOCX/ODT/HTML/TXT
-python3 test_administration.py # 28 tests — Administration, navigation, devises,
-                              #            comptes, taux, portabilité des données
+python3 test_administration.py # 32 tests — Administration, navigation, devises,
+                              #            comptes, taux, type de compte, portabilité
 python3 test_scenario.py     #   1 test  — scénario utilisateur réel de bout en bout
 # ou : make test
 ```

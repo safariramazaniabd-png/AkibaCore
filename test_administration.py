@@ -11,7 +11,8 @@ Couvre spécifiquement :
   - les comptes membres (épargne / crédit / courant / bloqué) ;
   - les taux figés à l'octroi (snapshot) ;
   - les reçus ;
-  - les modèles de documents (isolation par AVEC).
+  - les modèles de documents (isolation par AVEC) ;
+  - le type de compte du membre (choisi à l'ajout, informatif).
 
 Aucune dépendance externe (unittest uniquement).
 """
@@ -343,6 +344,47 @@ class TestComptesMembres(unittest.TestCase):
                      (self.mid,))
         self.db.commit()
         self.assertTrue(Finance.compte_bloque(self.db, self.mid, "epargne", "CDF"))
+
+
+# ════════════════════════════════════════════════════════════════
+#  TYPE DE COMPTE DU MEMBRE (choisi à l'ajout, informatif)
+# ════════════════════════════════════════════════════════════════
+
+class TestTypeCompteMembre(unittest.TestCase):
+    def test_type_compte_defaut_epargne(self):
+        db = DB(":memory:")
+        cols = [r["name"] for r in db.conn.execute("PRAGMA table_info(membre)")]
+        self.assertIn("type_compte", cols)
+        db.exec("INSERT INTO membre(nom,avec_id) VALUES('SANS_CHOIX',1)")
+        db.commit()
+        m = db.un("SELECT type_compte FROM membre WHERE nom='SANS_CHOIX'")
+        self.assertEqual(m["type_compte"], "epargne")
+
+    def test_type_compte_choisi_persiste(self):
+        db = DB(":memory:")
+        db.exec("INSERT INTO membre(nom,type_compte,avec_id) VALUES('CREDIT', 'credit', 1)")
+        db.commit()
+        self.assertEqual(db.valeur(
+            "SELECT type_compte FROM membre WHERE nom='CREDIT'"), "credit")
+
+    def test_type_compte_modifiable(self):
+        db = DB(":memory:")
+        db.exec("INSERT INTO membre(nom,type_compte,avec_id) VALUES('BLOQUE','bloque',1)")
+        db.commit()
+        db.exec("UPDATE membre SET type_compte='courant' WHERE nom='BLOQUE'")
+        db.commit()
+        self.assertEqual(db.valeur(
+            "SELECT type_compte FROM membre WHERE nom='BLOQUE'"), "courant")
+
+    def test_type_compte_ne_cree_pas_de_ligne_compte(self):
+        """Le type de compte du membre est informatif : aucune ligne dans
+        la table compte n'est créée à l'ajout d'un membre."""
+        db = DB(":memory:")
+        db.exec("INSERT INTO membre(nom,type_compte,avec_id) VALUES('INFO','epargne',1)")
+        db.commit()
+        self.assertEqual(db.valeur(
+            "SELECT COUNT(*) FROM compte WHERE membre_id="
+            "(SELECT id FROM membre WHERE nom='INFO')"), 0)
 
 
 # ════════════════════════════════════════════════════════════════

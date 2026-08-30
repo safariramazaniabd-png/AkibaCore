@@ -9,11 +9,11 @@
 
 ```
 VERSION            : 2.2.0
-TESTS              : 272/272  (OK)
+TESTS              : 276/276  (OK)
 BUILD WINDOWS      : PRÉPARÉ (script + spec + installateur + portable ; exe non produit ici)
-INSTALLATEUR       : AkibaCore_installer.iss -> AkibaCore_Setup_v2.2.0_Windows_x64.exe (à compiler sur Windows)
+INSTALLATEUR       : setup_windows/AkibaCore_installer.iss -> release\AkibaCore_Setup_v2.2.0_Windows_x64.exe (à compiler sur Windows)
 EXÉCUTABLE         : dist/AkibaCore (Linux, construit et testé) / AkibaCore.exe (Windows, prévu)
-VERSION PORTABLE   : creer_portable_windows.bat -> AkibaCore_Portable_v2.2.0_Windows.zip (à exécuter sur Windows)
+VERSION PORTABLE   : setup_windows/creer_portable_windows.bat -> AkibaCore_Portable_v2.2.0_Windows.zip (à exécuter sur Windows)
 OFFLINE            : OK (aucune dépendance réseau ; 100 % locale)
 ADMINISTRATION     : OK (cause racine corrigée)
 DOCUMENTS          : OK (modèles, variables, isolation par AVEC, actions)
@@ -111,6 +111,7 @@ jamais de traceback brut ».
 | Documents : modèles DOCX/ODT/HTML/TXT, variables `{{...}}`, modèle par défaut, import copié localement, isolation par AVEC, suppression avec confirmation + archivage | OK |
 | Devises : CDF / USD, séparation stricte, jamais additionnées sans taux de change, configuration par AVEC | OK |
 | Comptes : épargne, crédit, courant, bloqué (+ statuts, mouvements, événements) | OK |
+| Type de compte du membre choisi à l'ajout (informatif, migration v2→v3) | OK |
 | Taux & pénalités : configurables, **snapshot à l'octroi** (427 crédits inchangés quand le taux AVEC change) | OK |
 | Reçus : numérotation unique jamais réutilisée, devise, PDF | OK |
 | Rapports : soldes par devise, CSV UTF-8, HTML | OK |
@@ -127,11 +128,13 @@ jamais de traceback brut ».
 `remboursement`, `audit_log`, `permission`, `role`, `role_permission`,
 `user_permission`, `receipt`, `document_template`, `document_genere`,
 `compteur`, `compte`, `compte_evenement`, `compte_mouvement`
-(+ `sqlite_sequence`). `PRAGMA user_version = 2`. WAL + clés étrangères.
+(+ `sqlite_sequence`). `PRAGMA user_version = 3`. WAL + clés étrangères.
 
-Aucune migration ajoutée dans cette livraison (le schéma v2 était déjà
-stable). Les changements de cette livraison sont purement applicatifs
-(logique de navigation + choix du dossier de données).
+Migration v2 → v3 ajoutée dans cette livraison : colonne
+`membre.type_compte` (type de compte choisi à l'ajout d'un membre,
+informatif — codes `epargne/courant/bloque/credit`, défaut `epargne`).
+Les autres changements sont applicatifs (logique de navigation +
+choix du dossier de données).
 
 ---
 
@@ -144,9 +147,9 @@ stable). Les changements de cette livraison sont purement applicatifs
 | test_permissions.py | 19 | OK |
 | test_recus.py | 15 | OK |
 | test_modeles.py | 16 | OK |
-| **test_administration.py** (nouveau) | 28 | OK |
+| **test_administration.py** (nouveau) | 32 | OK |
 | **test_scenario.py** (nouveau) | 1 | OK |
-| **TOTAL** | **272** | **272/272 terminés** |
+| **TOTAL** | **276** | **276/276 terminés** |
 
 Les nouveaux tests verrouillent :
 - la cause racine de la page blanche (invariant `PERMISSIONS` +
@@ -173,12 +176,12 @@ Les nouveaux tests verrouillent :
 Cet environnement est **Linux et aucune machine Windows n'est disponible**.
 Les livrables Windows sont donc **préparés et documentés, non exécutés** :
 
-1. `build_windows.bat` → produit `dist\AkibaCore.exe` (PyInstaller).
-2. `creer_portable_windows.bat` → produit
+1. `setup_windows/build_windows.bat` → produit `dist\AkibaCore.exe` (PyInstaller).
+2. `setup_windows/creer_portable_windows.bat` → produit
    `AkibaCore_Portable_v2.2.0_Windows.zip` (structure
    `AkibaCore\AkibaCore.exe` + dossiers data/sauvegardes/documents/modeles/exports/logs).
-3. `AkibaCore_installer.iss` (Inno Setup, gratuit) → produit
-   `AkibaCore_Setup_v2.2.0_Windows_x64.exe` (raccourcis Bureau + Menu
+3. `setup_windows/AkibaCore_installer.iss` (Inno Setup, gratuit) → produit
+   `release\AkibaCore_Setup_v2.2.0_Windows_x64.exe` (raccourcis Bureau + Menu
    Démarrer, désinstallation sans toucher aux données).
 
 > **BUILD WINDOWS : PRÉPARÉ — VALIDATION WINDOWS RÉELLE : NON EFFECTUÉE**
@@ -187,20 +190,26 @@ Les livrables Windows sont donc **préparés et documentés, non exécutés** :
 
 ## 8. Livrables
 
-- `release/` — dossier de livraison (assemblé par `creer_release.sh` /
-  `creer_release.bat`) contenant : `CHANGELOG.md`,
+- `release/` — dossier de livraison (assemblé par `setup_linux/creer_release.sh` /
+  `setup_windows/creer_release.bat`) contenant : `CHANGELOG.md`,
   `GUIDE_INSTALLATION_WINDOWS.txt|md`, `GUIDE_UTILISATEUR.md`,
   `GUIDE_ADMINISTRATEUR.md`, `SHA256SUMS.txt`, et (lorsqu'ils sont
   produits sur Windows) l'installateur et la version portable.
-- `AkibaCore.ico`, `AkibaCore_installer.iss`, `creer_portable_windows.bat`,
-  `build_windows.bat`, `build_linux.sh`.
+- `AkibaCore.ico`, `icone_akibacore.png`,
+  `setup_windows/` (scripts de lancement et installation Windows :
+  `build_windows.bat`, `lancer_akibacore.bat`,
+  `creer_portable_windows.bat`, `creer_release.bat`,
+  `AkibaCore_installer.iss`),
+  `setup_linux/` (scripts de lancement et installation Linux :
+  `lancer_akibacore.sh`, `build_linux.sh`, `installer_raccourci.sh`,
+  `creer_release.sh`, `akibacore.desktop`).
 
 ---
 
 ## 9. Problèmes restants (non bloquants)
 
 1. **Windows non réellement validé** (installateur/exe/impression) —
-   à faire sur une machine Windows 10/11 avec `build_windows.bat` puis
+   à faire sur une machine Windows 10/11 avec `setup_windows/build_windows.bat` puis
    test manuel (guide fourni).
 2. **Impression non testée** : aucun périphérique d'impression dans cet
    environnement. Le chemin d'impression ne provoque aucune erreur sans

@@ -213,7 +213,7 @@ class TestMigrationV0(unittest.TestCase):
         _creer_base_v0(tmp)
         try:
             db = DB(tmp)
-            self.assertEqual(db.valeur("PRAGMA user_version"), 2)
+            self.assertEqual(db.valeur("PRAGMA user_version"), 3)
             tables = {r[0] for r in db.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%'")}
@@ -227,6 +227,8 @@ class TestMigrationV0(unittest.TestCase):
             cols_user = {r[1] for r in db.conn.execute("PRAGMA table_info(utilisateur)")}
             self.assertIn("avec_id", cols_user)
             self.assertIn("derniere_connexion", cols_user)
+            cols_membre = {r[1] for r in db.conn.execute("PRAGMA table_info(membre)")}
+            self.assertIn("type_compte", cols_membre)
             for tbl, col in (("epargne", "devise"), ("credit", "devise"),
                              ("credit", "type_credit"), ("credit", "taux_penalite"),
                              ("remboursement", "devise"), ("receipt", "devise")):
@@ -268,10 +270,12 @@ class TestMigrationV0(unittest.TestCase):
         try:
             DB(tmp)               # première migration
             db = DB(tmp)          # réouverture : ne doit pas casser ni dupliquer
-            self.assertEqual(db.valeur("PRAGMA user_version"), 2)
+            self.assertEqual(db.valeur("PRAGMA user_version"), 3)
             self.assertEqual(db.valeur("SELECT COUNT(*) FROM utilisateur"), 2)
             self.assertEqual(db.valeur("SELECT COUNT(*) FROM role"), len(ROLES_DEFAUTS))
             self.assertFalse(db.conn.execute("PRAGMA foreign_key_check").fetchall())
+            self.assertIn("type_compte",
+                          {r[1] for r in db.conn.execute("PRAGMA table_info(membre)")})
         finally:
             for suffixe in ("", "-wal", "-shm"):
                 try:

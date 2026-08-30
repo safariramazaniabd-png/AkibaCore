@@ -2,10 +2,11 @@
 ;  AkibaCore v2.2.0 - Script d'installation Windows (Inno Setup)
 ; ============================================================
 ;  Comment construire l'installateur :
-;    1. Sur Windows : lancez build_windows.bat (produit dist\AkibaCore.exe)
+;    1. Sur Windows : lancez build_windows.bat (dans ce dossier,
+;       produit ..\dist\AkibaCore.exe)
 ;    2. Ouvrez ce fichier dans Inno Setup (gratuit : https://jrsoftware.org/isinfo.php)
 ;    3. Menu : Build > Compile
-;    4. Le resultat est :  AkibaCore_Setup_v2.2.0_Windows_x64.exe
+;    4. Le resultat est :  ..\release\AkibaCore_Setup_v2.2.0_Windows_x64.exe
 ; ============================================================
 ;
 ;  IMPORTANT — DONNEES UTILISATEUR :
@@ -30,9 +31,9 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={commonpf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=release
+OutputDir=..\release
 OutputBaseFilename=AkibaCore_Setup_v{#MyAppVersion}_Windows_x64
-SetupIconFile=AkibaCore.ico
+SetupIconFile=..\AkibaCore.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
 SolidCompression=yes
@@ -53,8 +54,8 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Name: "desktopicon"; Description: "Creer un raccourci sur le Bureau"; GroupDescription: "Raccourcis :"; Flags: unchecked
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "AkibaCore.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\AkibaCore.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\AkibaCore.ico"

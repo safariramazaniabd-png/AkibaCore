@@ -38,7 +38,7 @@ Tout le code vit dans `main.py`. Classes principales dans l'ordre :
 
 | Classe | Role |
 |--------|------|
-| `DB` | Connexion SQLite, init schema, migrations (`PRAGMA user_version` 0→2), seeds, helper audit |
+| `DB` | Connexion SQLite, init schema, migrations (`PRAGMA user_version` 0→3), seeds, helper audit |
 | `Finance` | Calculs financiers statiques purs (interets, penalites, echeances) |
 | `Auth` | Connexion, changement mot de passe, verification `permis()/exiger()` (permissions + rôles, `PermissionError` + audit `REFUS_ACTION`) |
 | `Backup` | Sauvegarde auto dans `sauvegardes/` (rotation sur 15 fichiers), restauration |
@@ -64,8 +64,8 @@ Tout le code vit dans `main.py`. Classes principales dans l'ordre :
 Sept suites sans framework (bibliotheque standard `unittest`) :
 `python3 test_finance.py` (61 tests), `python3 test_complet.py` (132 tests),
 `python3 test_permissions.py` (19 tests), `python3 test_recus.py` (15 tests),
-`python3 test_modeles.py` (16 tests), `python3 test_administration.py` (28 tests)
-et `python3 test_scenario.py` (1 test) — soit **272 tests**,
+`python3 test_modeles.py` (16 tests), `python3 test_administration.py` (32 tests)
+et `python3 test_scenario.py` (1 test) — soit **276 tests**,
 ou simplement `make test`. Aucun linter ni type checker.
 La CI construit l'executable **et execute la suite de tests**.
 

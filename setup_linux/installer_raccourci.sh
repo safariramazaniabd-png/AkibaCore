@@ -9,6 +9,7 @@
 
 cd "$(dirname "$0")" || exit 1
 DOSSIER="$(pwd)"
+PROJET="$(dirname "$DOSSIER")"
 
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
@@ -24,13 +25,13 @@ if [ ! -f "$DOSSIER/lancer_akibacore.sh" ]; then
 fi
 
 chmod +x "$DOSSIER/lancer_akibacore.sh" 2>/dev/null
-[ -f "$DOSSIER/AkibaCore" ] && chmod +x "$DOSSIER/AkibaCore" 2>/dev/null
+[ -f "$PROJET/AkibaCore" ] && chmod +x "$PROJET/AkibaCore" 2>/dev/null
 
 APPS="$HOME/.local/share/applications"
 ICONS="$HOME/.local/share/icons"
 mkdir -p "$APPS" "$ICONS"
 
-cp -f icone_akibacore.png "$ICONS/" 2>/dev/null
+cp -f "$PROJET/icone_akibacore.png" "$ICONS/" 2>/dev/null
 
 # ── Génération du fichier .desktop avec chemins absolus ──
 cat > "$APPS/akibacore.desktop" <<EOF
@@ -41,7 +42,7 @@ Name=AkibaCore
 GenericName=Gestion AVEC
 Comment=Système de gestion des Associations Villageoises d'Épargne et de Crédit
 Exec=$DOSSIER/lancer_akibacore.sh
-Path=$DOSSIER
+Path=$PROJET
 Icon=$ICONS/icone_akibacore.png
 Terminal=false
 Categories=Office;Finance;Database;
@@ -53,7 +54,7 @@ update-desktop-database "$APPS" 2>/dev/null
 
 echo "  ✔ Raccourci installé dans le menu : Applications → Bureau / Office"
 echo "    ($APPS/akibacore.desktop)"
-echo "    Dossier de l'application : $DOSSIER"
+echo "    Dossier de l'application : $PROJET"
 
 # ── Raccourci sur le Bureau si présent ──
 for BUREAU in "$HOME/Bureau" "$HOME/Desktop"; do

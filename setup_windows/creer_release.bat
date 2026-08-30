@@ -5,6 +5,8 @@ REM  A executer APRES build_windows.bat (+ creer_portable_windows.bat)
 REM ============================================================
 setlocal
 cd /d "%~dp0"
+REM On travaille depuis la racine du projet (parents de setup_windows\)
+pushd "%~dp0.."
 
 echo === Assemblage du dossier release\ ===
 if not exist "release" mkdir "release"
@@ -33,4 +35,5 @@ cd ..
 echo.
 echo Dossier release\ pret.
 pause
+popd
 endlocal

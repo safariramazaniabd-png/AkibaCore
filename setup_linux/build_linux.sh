@@ -3,10 +3,11 @@
 #  Script de compilation AkibaCore v2.2.0 -> exécutable Linux
 #  Usage : ./build_linux.sh
 #  Prérequis : Python 3.8+ et python3-tk installés
+#  On compile depuis la racine du projet (parents de setup_linux/)
 # ============================================================
 
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "=== Vérification de Python ==="
 python3 --version || { echo "ERREUR : Python 3 non installé."; exit 1; }

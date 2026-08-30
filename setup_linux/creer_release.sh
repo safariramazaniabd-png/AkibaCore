@@ -1,15 +1,16 @@
 #!/bin/bash
 # ============================================================
 #  AkibaCore v2.2.0 — Assemblage du dossier de livraison release/
-#  Usage : ./creer_release.sh
+#  Usage : ./creer_release.sh   (depuis setup_linux/)
 #
 #  Copie la documentation dans release/ et génère SHA256SUMS.txt.
 #  Si l'installateur / la version portable Windows existent, ils
 #  sont intégrés automatiquement (après build sur Windows).
+#  On assemble depuis la racine du projet (parents de setup_linux/).
 # ============================================================
 
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "=== Assemblage du dossier release/ ==="
 mkdir -p release

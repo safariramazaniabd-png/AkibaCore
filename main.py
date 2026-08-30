@@ -378,6 +378,8 @@ class DB:
             nb_parts      INTEGER DEFAULT 1,
             statut        TEXT DEFAULT 'actif'
                           CHECK(statut IN ('actif','suspendu','sorti')),
+            type_compte   TEXT DEFAULT 'epargne'
+                          CHECK(type_compte IN ('epargne','courant','bloque','credit')),
             date_adhesion TEXT DEFAULT (date('now','localtime')),
             notes         TEXT,
             cree_le       TEXT DEFAULT (datetime('now','localtime')),
@@ -752,6 +754,28 @@ class DB:
                 ]:
                     c.execute(idx_sql)
                 c.execute("PRAGMA user_version = 2")
+                c.commit()
+                anomalies = c.execute("PRAGMA foreign_key_check").fetchall()
+                if anomalies:
+                    c.rollback()
+            except Exception:
+                c.rollback()
+                raise
+            finally:
+                c.execute("PRAGMA foreign_keys=ON")
+
+        # ── v2 → v3 : type de compte informatif sur le membre ──────
+        if version < 3:
+            c = self.conn
+            c.execute("PRAGMA foreign_keys=OFF")
+            try:
+                c.execute("BEGIN")
+                cols = [r["name"] for r in c.execute("PRAGMA table_info(membre)").fetchall()]
+                if "type_compte" not in cols:
+                    c.execute("""
+                        ALTER TABLE membre ADD COLUMN type_compte TEXT DEFAULT 'epargne'
+                    """)
+                c.execute("PRAGMA user_version = 3")
                 c.commit()
                 anomalies = c.execute("PRAGMA foreign_key_check").fetchall()
                 if anomalies:
@@ -2547,7 +2571,7 @@ class DlgMembre(tk.Toplevel):
         self.title("Modifier membre" if membre else "Ajouter un membre")
         self.resizable(False, False)
         self.grab_set()
-        centrer(self, 450, 490)
+        centrer(self, 450, 530)
         self._ui()
 
     def _ui(self):
@@ -2582,8 +2606,19 @@ class DlgMembre(tk.Toplevel):
                      values=["actif","suspendu","sorti"],
                      state="readonly", width=26).grid(row=r2, column=1, sticky="ew", pady=5)
 
+        choix_type = [(lib, code) for code, lib in _LIBELLES_COMPTE.items()]
+        self.v_type = tk.StringVar(
+            value=next((lib for lib, code in choix_type
+                        if code == m.get("type_compte")), _LIBELLES_COMPTE["epargne"]))
+        ttk.Label(frm, text="Type de compte").grid(
+            row=r2+1, column=0, sticky="e", padx=(0,8), pady=5)
+        ttk.Combobox(frm, textvariable=self.v_type,
+                     values=[lib for lib, _c in choix_type],
+                     state="readonly", width=26).grid(
+            row=r2+1, column=1, sticky="ew", pady=5)
+
         bf = ttk.Frame(frm)
-        bf.grid(row=r2+1, column=0, columnspan=2, pady=16)
+        bf.grid(row=r2+2, column=0, columnspan=2, pady=16)
         btn(bf, "Enregistrer", self._sauver, "Vert.TButton").pack(side="left", padx=8)
         btn(bf, "Annuler", self.destroy).pack(side="left", padx=8)
 
@@ -2600,6 +2635,9 @@ class DlgMembre(tk.Toplevel):
             if nb < 1:
                 raise ValueError("Le nombre de parts doit être >= 1.")
             dt  = Finance.valider_date(self.vs["date_adhesion"].get())
+            code_type = next(
+                (code for code, lib in _LIBELLES_COMPTE.items()
+                 if lib == self.v_type.get()), "epargne")
             d = dict(
                 nom=nom,
                 prenom=self.vs["prenom"].get().strip() or None,
@@ -2609,6 +2647,7 @@ class DlgMembre(tk.Toplevel):
                 nb_parts=nb,
                 date_adhesion=dt.isoformat(),
                 statut=self.v_statut.get(),
+                type_compte=code_type,
                 notes=self.vs["notes"].get().strip() or None,
                 avec_id=self.avec_id,
             )
@@ -2616,7 +2655,8 @@ class DlgMembre(tk.Toplevel):
                 self.db.exec("""
                     UPDATE membre SET nom=:nom,prenom=:prenom,telephone=:telephone,
                     adresse=:adresse,numero=:numero,nb_parts=:nb_parts,
-                    date_adhesion=:date_adhesion,statut=:statut,notes=:notes
+                    date_adhesion=:date_adhesion,statut=:statut,
+                    type_compte=:type_compte,notes=:notes
                     WHERE id=:id
                 """, {**d, "id": self.m["id"]})
                 self.db.audit(self.auth.uid, self.auth.ulogin, "MODIFIER_MEMBRE",
@@ -2624,9 +2664,9 @@ class DlgMembre(tk.Toplevel):
             else:
                 cur = self.db.exec("""
                     INSERT INTO membre(avec_id,nom,prenom,telephone,adresse,numero,
-                    nb_parts,date_adhesion,statut,notes)
+                    nb_parts,date_adhesion,statut,type_compte,notes)
                     VALUES(:avec_id,:nom,:prenom,:telephone,:adresse,:numero,
-                    :nb_parts,:date_adhesion,:statut,:notes)
+                    :nb_parts,:date_adhesion,:statut,:type_compte,:notes)
                 """, d)
                 self.db.audit(self.auth.uid, self.auth.ulogin, "AJOUTER_MEMBRE",
                               "membre", cur.lastrowid, {"nom": nom})
@@ -2643,7 +2683,7 @@ class DlgDetailMembre(tk.Toplevel):
         super().__init__(parent)
         self.db = db; self.m = m
         self.title(f"Dossier — {m['nom']} {m.get('prenom') or ''}")
-        centrer(self, 720, 580)
+        centrer(self, 720, 600)
         self.grab_set()
         self._ui()
 
@@ -2660,6 +2700,7 @@ class DlgDetailMembre(tk.Toplevel):
             ("Téléphone",      self.m.get("telephone") or "—"),
             ("Adresse",        self.m.get("adresse") or "—"),
             ("Nombre de parts",str(self.m.get("nb_parts", 1))),
+            ("Type de compte", _libelle_compte(self.m.get("type_compte"))),
             ("Adhésion",       self.m.get("date_adhesion") or "—"),
             ("Statut",         (self.m.get("statut") or "").upper()),
             ("Notes",          self.m.get("notes") or "—"),

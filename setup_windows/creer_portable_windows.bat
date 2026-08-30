@@ -12,6 +12,8 @@ REM ============================================================
 
 setlocal
 cd /d "%~dp0"
+REM On travaille depuis la racine du projet (parents de setup_windows\)
+pushd "%~dp0.."
 
 echo ============================================================
 echo  AkibaCore v2.2.0 - Assemblage de la version PORTABLE
@@ -19,9 +21,10 @@ echo ============================================================
 echo.
 
 if not exist "dist\AkibaCore.exe" (
-    echo ERREUR : dist\AkibaCore.exe introuvable.
-    echo Lancez d'abord : build_windows.bat
+    echo ERREUR : dist\AkibaCore.exe introuvable dans la racine du projet.
+    echo Lancez d'abord : setup_windows\build_windows.bat
     pause
+    popd
     exit /b 1
 )
 
@@ -72,4 +75,5 @@ echo   2. Double-cliquez sur AkibaCore.exe
 echo   3. Les donnees sont conservees DANS le dossier portable.
 echo ============================================================
 pause
+popd
 endlocal

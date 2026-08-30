@@ -2,10 +2,11 @@
 # ============================================================
 #  AkibaCore v2.2.0 — Script de lancement (Linux / macOS)
 #  Usage : ./lancer_akibacore.sh   (ou double-clic)
+#  L'application se trouve dans le dossier PARENT (projet).
 # ============================================================
 
-# Toujours travailler dans le dossier du script (base de données locale)
-cd "$(dirname "$0")" || exit 1
+# Toujours travailler dans la racine du projet (base de données locale)
+cd "$(dirname "$0")/.." || exit 1
 
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
