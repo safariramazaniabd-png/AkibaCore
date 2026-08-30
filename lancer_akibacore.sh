@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  AkibaCore v2.0.0 — Script de lancement (Linux / macOS)
+#  AkibaCore v2.2.0 — Script de lancement (Linux / macOS)
 #  Usage : ./lancer_akibacore.sh   (ou double-clic)
 # ============================================================
 
@@ -9,7 +9,7 @@ cd "$(dirname "$0")" || exit 1
 
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
-echo "  ║       AkibaCore v2.0.0 — Démarrage       ║"
+echo "  ║       AkibaCore v2.2.0 — Démarrage       ║"
 echo "  ╚══════════════════════════════════════════╝"
 echo ""
 

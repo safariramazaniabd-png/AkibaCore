@@ -1,4 +1,4 @@
-# GUIDE UTILISATEUR — AkibaCore v2.0.0
+# GUIDE UTILISATEUR — AkibaCore v2.2.0
 
 Manuel pas-à-pas pour l'utilisation quotidienne d'AkibaCore.
 À imprimer et garder à portée de main lors des réunions.
@@ -11,11 +11,15 @@ Manuel pas-à-pas pour l'utilisation quotidienne d'AkibaCore.
 2. [Enregistrer une épargne](#2-enregistrer-une-épargne)
 3. [Accorder un crédit](#3-accorder-un-crédit)
 4. [Enregistrer un remboursement](#4-enregistrer-un-remboursement)
-5. [Clôturer une session (réunion)](#5-clôturer-une-session-réunion)
-6. [Générer un rapport](#6-générer-un-rapport)
-7. [Sauvegarder les données](#7-sauvegarder-les-données)
-8. [Restaurer une sauvegarde](#8-restaurer-une-sauvegarde)
-9. [Changer mon mot de passe](#9-changer-mon-mot-de-passe)
+5. [Suivre les comptes membres](#5-suivre-les-comptes-membres)
+6. [Clôturer une session (réunion)](#6-clôturer-une-session-réunion)
+7. [Générer un rapport](#7-générer-un-rapport)
+8. [Imprimer les reçus](#8-imprimer-les-reçus)
+9. [Générer un document à partir d'un modèle](#9-générer-un-document-à-partir-dun-modèle)
+10. [Sauvegarder les données](#10-sauvegarder-les-données)
+11. [Restaurer une sauvegarde](#11-restaurer-une-sauvegarde)
+12. [Changer mon mot de passe](#12-changer-mon-mot-de-passe)
+13. [Administration : utilisateurs et droits](#13-administration--utilisateurs-et-droits)
 
 ---
 
@@ -55,8 +59,10 @@ ré-enregistrez. Pour un départ définitif, mettez son statut à `sorti`
 
 1. Onglet **Épargnes** → bouton **+ Enregistrer dépôt**.
 2. Choisissez le membre dans la liste déroulante.
-3. Saisissez le **montant en FC** (chiffres seulement ; virgule acceptée :
-   `50000` ou `50 000,50`).
+3. Saisissez le **montant** (chiffres seulement ; virgule acceptée :
+   `50000` ou `50 000,50`), dans la **devise** de votre AVEC
+   (CDF, ou USD si l'AVEC l'autorise) : la devise se choisit avant
+   l'enregistrement.
 4. Vérifiez la date (celle du jour est proposée).
 5. Choisissez le type :
    - `ordinaire` : épargne classique hebdomadaire/mensuelle ;
@@ -65,6 +71,9 @@ ré-enregistrez. Pour un départ définitif, mettez son statut à `sorti`
 6. Cliquez **Enregistrer**.
 
 Le total affiché en haut de l'onglet augmente immédiatement.
+
+À la validation, l'application propose **Imprimer / Voir / PDF** un
+**reçu** numéroté (`REC-AAAA-NNNNNN`) de vérification du dépôt.
 
 **Annuler une erreur** (mauvais montant, mauvais membre) :
 
@@ -91,10 +100,15 @@ de protection de l'association.
 4. **Lisez l'aperçu bleu** sous le formulaire :
 
    ```
-   Intérêt : 10,000 FC  |  Total : 110,000 FC
+   Intérêt : 10,000 CDF  |  Total : 110,000 CDF
    ```
 
    Formule : Intérêt = Principal × Taux × Durée ÷ 12.
+   Choisissez aussi la **devise** du crédit (CDF par défaut) et le
+   **type** (Ordinaire / Urgence / Investissement) : le **taux affiché
+   est celui du type retenu** (configuré par l'administrateur) et sera
+   **figé** pour toute la durée du crédit, même si l'AVEC change ses
+   paramètres par la suite.
 5. Cliquez **Octroyer**. Une confirmation récapitule tout, y compris
    la **date d'échéance** calculée automatiquement.
 
@@ -109,6 +123,9 @@ de protection de l'association.
 
 La liste se met à jour toute seule à chaque ouverture de l'onglet.
 
+L'octroi d'un crédit produit automatiquement son **reçu** (imprimer /
+voir / PDF) avec montant, intérêt, total à rembourser et échéance.
+
 ---
 
 ## 4. Enregistrer un remboursement
@@ -122,9 +139,9 @@ La liste se met à jour toute seule à chaque ouverture de l'onglet.
 5. Cliquez **Enregistrer**. Une confirmation détaille la répartition :
 
 ```
-Principal  : 545 FC
-Intérêt    : 55 FC
-Pénalité   : 0 FC
+Principal  : 545 CDF
+Intérêt    : 55 CDF
+Pénalité   : 0 CDF
 Statut crédit : ACTIF
 ```
 
@@ -133,6 +150,7 @@ Statut crédit : ACTIF
 ```
 1) Pénalité de retard   → 2 % du solde par MOIS de retard complet
                           (affichée en rouge avant validation)
+                          — taux figé à l'octroi du crédit
 2) Intérêts restants    → au prorata du restant dû
 3) Principal            → tout le reste
 ```
@@ -143,9 +161,32 @@ Vous n'avez aucun calcul à faire : saisissez uniquement le total versé.
 le crédit passe automatiquement à **SOLDE**. Le membre peut alors
 demander un nouveau crédit.
 
+Le reçu de remboursement détaille la répartition exacte (pénalité /
+intérêt / principal / solde restant).
+
 ---
 
-## 5. Clôturer une session (réunion)
+## 5. Suivre les comptes membres
+
+L'onglet **Comptes** regroupe tous les comptes de chaque membre, par type
+(**épargne**, **courant**, **bloqué**, **crédit**) et par **devise**
+(CDF / USD) :
+
+1. Le tableau montre le solde et le **statut** de chaque compte
+   (`Actif`, `Bloqué`, `Suspendu`).
+2. Sélectionnez un compte puis **Bloquer** / **Débloquer** /
+   **Suspendre** / **Réactiver** pour en changer l'accès : un comprise
+   bloqué ne peut plus recevoir de nouvelles opérations tant qu'il
+   n'est pas débloqué.
+3. **Détail** (ou double-clic) ouvre la fiche du compte : informations,
+   historique des **événements** (blocage, déblocage, suspension…) et
+   des **mouvements** (pour les comptes courant et bloqué).
+4. La case **Rechercher** filtre par nom et la liste **Devise** par
+   monnaie — les totaux sont **toujours calculés par devise**.
+
+---
+
+## 6. Clôturer une session (réunion)
 
 Les sessions servent à numéroter les réunions et rattacher les opérations.
 
@@ -160,7 +201,7 @@ l'application le refuse proprement.
 
 ---
 
-## 6. Générer un rapport
+## 7. Générer un rapport
 
 Onglet **Rapports** — tous les boutons enregistrent un fichier que vous
 choisissez où placer (bureau, clé USB…).
@@ -182,7 +223,58 @@ Les fichiers CSV s'ouvrent dans Excel/LibreOffice avec accents corrects.
 
 ---
 
-## 7. Sauvegarder les données
+## 8. Imprimer les reçus
+
+Dès qu'un dépôt, un crédit ou un remboursement est enregistré, une
+fenêtre propose **trois choix** :
+
+| Bouton | Que se passe-t-il ? |
+|---|---|
+| **Imprimer** | Envoie le reçu à l'imprimante (format A6). Si l'option « impression automatique » est active dans **Paramètres**, rien à cliquer : le reçu sort tout seul. |
+| **Voir** | Affiche un aperçu du reçu à l'écran, puis imprimable. |
+| **Enregistrer en PDF** | Crée `documents/recus/REC-AAAA-NNNNNN.pdf` (le dossier est créé automatiquement). |
+
+**Numérotation :** chaque reçu porte un numéro unique du type
+`REC-2026-000012`. Un numéro donné n'est **jamais** réattribué, même
+après suppression : les registres restent cohérents.
+
+**Réimprimer un reçu :** onglet **Documents → Reçus** — sélectionnez
+le reçu puis **Réimprimer** à tout moment.
+
+---
+
+## 9. Générer un document à partir d'un modèle
+
+Votre AVEC peut utiliser ses propres documents officiels (attestation,
+relevé, PV de réunion, rapport financier) préparés dans **Word (DOCX),
+LibreOffice (ODT), ou un simple fichier HTML/TXT**.
+
+**Importer un modèle :** onglet **Documents → Modèles → + Importer**,
+puis choisir le fichier. Les champs `{{...}}` y sont remplacés
+automatiquement par AkibaCore :
+
+- Informations de l'AVEC : `{{AVEC_NOM}}`, `{{AVEC_ADRESSE}}`,
+  `{{AVEC_TELEPHONE}}`, `{{AVEC_EMAIL}}`, `{{AVEC_DEVISE}}` ;
+- Membre : `{{MEMBRE_NOM}}`, `{{MEMBRE_PRENOM}}`, `{{MEMBRE_NUMERO}}`,
+  `{{MEMBRE_TELEPHONE}}`, `{{MEMBRE_PARTS}}` ;
+- Operation/reçu : `{{RECU_NUMERO}}`, `{{TYPE_OPERATION}}`,
+  `{{MONTANT}}`, `{{DATE}}`, `{{HEURE}}` ;
+- Crédit : `{{CREDIT_NUMERO}}`, `{{PRINCIPAL}}`, `{{INTERET}}`,
+  `{{PENALITE}}`, `{{SOLDE}}`, `{{SESSION_NUMERO}}`.
+
+**Définir un modèle par défaut** par type de document (Reçu, Attestation,
+Rapport financier, Relevé membre, Bilan, Procès-verbal) : onglet
+**Modeles → Définir comme modèle par défaut**. La prochaine génération
+de ce type utilisera automatiquement votre modèle.
+
+**Générer :** Documents → **Générer un document** → choisissez le type,
+le membre/contexte (montant, crédit) puis **Générer**. Vous pouvez
+**Prévisualiser**, **Imprimer**, **Exporter en PDF** ou retrouver le
+document dans l'historique `document_genere`.
+
+---
+
+## 10. Sauvegarder les données
 
 AkibaCore sauvegarde déjà **automatiquement toutes les 30 minutes**
 et **à chaque fermeture**. Mais après une réunion importante :
@@ -199,7 +291,7 @@ anciennes sont supprimées pour ne pas remplir le disque.
 
 ---
 
-## 8. Restaurer une sauvegarde
+## 11. Restaurer une sauvegarde
 
 **Cas 1 — L'application propose elle-même la restauration.**
 Si au démarrage un message annonce que la base est endommagée et propose
@@ -219,7 +311,7 @@ Si au démarrage un message annonce que la base est endommagée et propose
 
 ---
 
-## 9. Changer mon mot de passe
+## 12. Changer mon mot de passe
 
 1. Bouton **Changer mot de passe** en bas de la fenêtre.
 2. Saisissez votre mot de passe actuel.
@@ -234,6 +326,40 @@ deux responsables différents.
 **Oubli total ?** Seul un administrateur peut recréer un compte
 (GUIDE_ADMINISTRATEUR.md). S'il n'y a qu'un compte admin perdu,
 restaurez une sauvegarde antérieure à la perte.
+
+---
+
+* Aide-mémoire : Membre → Épargne → Crédit → Remboursement → Session →
+Rapport → Sauvegarde. Chaque opération est tracée dans le journal d'audit.*
+
+---
+
+## 13. Administration : utilisateurs et droits
+
+Réservée aux comptes disposant de la permission (`users.*`,
+généralement l'administrateur) : onglet **Administration**.
+
+### Utilisateurs
+L'onglet **Utilisateurs** affiche tous les comptes (nom, identifiant,
+rôle, statut, AVEC). Les boutons d'action :
+
+| Bouton | Effet |
+|---|---|
+| **+ Nouvel utilisateur** | Crée un compte : nom, identifiant, mot de passe (jamais le mot de passe usine), rôle, AVEC. |
+| **Modifier** | Change le nom, le rôle, l'AVEC d'un compte. |
+| **Permissions** | Ajoute/retire des permissions individuelles (en plus de celles du rôle). |
+| **Rôles** | Crée/modifie/supprime des ensembles de permissions sur mesure. |
+| **Activer/Désactiver** | Bloque/relance la connexion d'un compte sans perdre son historique. (On ne peut pas désactiver son propre compte.) |
+| **Réinitialiser mdp** | Impose un nouveau mot de passe à un compte. |
+
+### Journal d'activité (audit)
+L'onglet **Journal d'activité** liste chronologiquement toutes les
+opérations sensibles (connexions, ajouts, dépôts, crédits,
+remboursements, sauvegardes, refus d'accès…), filtrables par utilisateur
+et exportables en CSV.
+
+> Tout changement de droits, de taux ou de paramètres est enregistré :
+> on sait toujours qui a fait quoi et quand.
 
 ---
 

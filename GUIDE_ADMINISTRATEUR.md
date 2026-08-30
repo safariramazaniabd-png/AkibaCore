@@ -1,4 +1,4 @@
-# GUIDE ADMINISTRATEUR — AkibaCore v2.0.0
+# GUIDE ADMINISTRATEUR — AkibaCore v2.2.0
 
 Manuel des responsables : comptes, permissions, sauvegardes,
 maintenance et sécurité. À lire intégralement avant la mise en service.
@@ -12,7 +12,8 @@ maintenance et sécurité. À lire intégralement avant la mise en service.
 3. [Rôles et permissions](#3-rôles-et-permissions)
 4. [Politique de sauvegarde](#4-politique-de-sauvegarde)
 5. [Restauration](#5-restauration)
-6. [Maintenance périodique](#6-maintenance-périodique)
+6. [Paramètres financiers (onglet Paramètres → section « Financiers »)](#6-paramètres-financiers-onglet-paramètres--section--financiers-)
+7. [Maintenance périodique](#7-maintenance-périodique)
 7. [Sécurité](#7-sécurité)
 8. [Dépannage avancé](#8-dépannage-avancé)
 
@@ -38,69 +39,101 @@ maintenance et sécurité. À lire intégralement avant la mise en service.
 
 ## 2. Gestion des utilisateurs
 
-AkibaCore n'a pas d'écran de gestion des comptes par choix de simplicité :
-les comptes se gèrent en ligne de commande SQLite, par l'administrateur.
+Depuis la v2.1, tout se gère **dans l'application**, onglet
+**Administration → Utilisateurs** (réservé à `admin`/permission
+`users.*`) :
 
-**Créer un compte** (application fermée) :
+- **+ Nouvel utilisateur** : nom, identifiant, mot de passe (jamais le
+  mot de passe usine), rôle, AVEC, compte actif.
+- **Modifier** : nom, rôle, AVEC, statut du compte.
+- **Permissions** : ajuste les permissions individuelles du compte
+  (par-dessus celles de son rôle).
+- **Rôles** : crée/modifie/supprime des rôles sur mesure (ensembles de
+  permissions) ; les 7 rôles prédéfinis ne sont pas supprimables.
+- **Activer/Désactiver** : bloque la connexion sans perdre l'historique.
+- **Réinitialiser mdp** : impose un mot de passe de remplacement
+  (interdiction de revenir au mot de passe usine).
+
+Chaque action est consignée au journal d'activité (`CREER_UTILISATEUR`,
+`MODIFIER_UTILISATEUR`, `DESACTIVER_UTILISATEUR`, `REINITIALISER_MDP`,
+`DEFINIR_PERMISSIONS`, …).
+
+Un administrateur ne peut pas désactiver son propre compte.
+
+En cas de maintenance d'urgence, les mêmes opérations restent
+possibles en ligne de commande (application fermée) :
 
 ```bash
 python3 -c "
 from main import DB, Auth
-db = DB()
-Auth(db)  # vérifie la base
 import secrets, hashlib
-login  = 'agent_marie'
-mdp    = 'UnMotDePasseSolide2026'
-sel    = secrets.token_hex(16)
-ph     = hashlib.pbkdf2_hmac('sha256', f'{mdp}{sel}'.encode(), sel.encode(), 100000).hex()
-db.exec('INSERT INTO utilisateur(nom,login,pwd_hash,sel,role) VALUES(?,?,?,?,?)',
+db = DB()
+login, mdp = 'agent_marie', 'UnMotDePasseSolide2026'
+sel = secrets.token_hex(16)
+ph  = hashlib.pbkdf2_hmac('sha256', f'{mdp}{sel}'.encode(), sel.encode(), 100000).hex()
+db.exec('INSERT INTO utilisateur(nom,login,pwd_hash,sel,role,avec_id) VALUES(?,?,?,?,?,1)',
         ('Marie N.', login, ph, sel, 'agent'))
 db.commit()
 print('Compte créé :', login)
 "
 ```
 
-Remplacez `'agent'` par `'lecteur'` ou `'admin'` selon le rôle voulu.
-Communiquez le mot de passe initial **oralement**, puis demandez à
-la personne de le changer dès son premier login (bouton
-« Changer mot de passe »).
-
-**Désactiver un compte** (départ d'un agent, sans perdre l'historique) :
-
-```bash
-sqlite3 akibacore.db "UPDATE utilisateur SET actif=0 WHERE login='agent_marie';"
-```
-
+Désactiver : `sqlite3 akibacore.db "UPDATE utilisateur SET actif=0 WHERE login='agent_marie';"`
 Un compte désactivé ne peut plus se connecter ; ses actions passées
-restent visibles dans le journal d'audit.
-
-**Réinitialiser un mot de passe oublié** (autre admin obligatoire) :
-même commande que la création avec `UPDATE utilisateur SET pwd_hash=?, sel=? WHERE login=?`.
+restent dans le journal d'audit.
 
 ---
 
 ## 3. Rôles et permissions
 
-| Action | admin | agent | lecteur |
-|---|:-:|:-:|:-:|
-| Consulter membres/épargnes/crédits/sessions | ✓ | ✓ | ✓ |
-| Bilan + exports CSV + rapport HTML | ✓ | ✓ | ✓ |
-| Créer/modifier membres, épargnes, crédits, remboursements, sessions | ✓ | ✓ | ✗ |
-| Annuler une épargne / annuler un crédit | ✓ | ✓ | ✗ |
-| Sauvegarde manuelle de la base | ✓ | ✓ | ✗ |
-| Journal d'audit complet | ✓ | ✓ | ✓ |
+### 3.1 Sept rôles prédéfinis
 
-Garanties techniques vérifiées par tests :
+| Rôle | Domaine |
+|---|---|
+| **admin** | Toutes les permissions (42) |
+| **agent** | Toutes les opérations courantes + reçus + sauvegarde manuelle + vue des comptes |
+| **caissier** | Épargne, remboursements, reçus imprimés |
+| **gestionnaire_credit** | Crédits et remboursements |
+| **secretaire** | Membres, sessions, génération de documents |
+| **auditeur** | Lecture + rapports + journal d'activité |
+| **lecteur** | Consultation seule |
 
-- Les boutons d'action sont **retirés** de l'interface pour `lecteur`
-  (pas simplement grisés).
-- La règle « un seul crédit actif par membre » est appliquée dans la
-  logique métier, pas seulement à l'écran : contourner l'interface ne
-  permet pas de l'enfreindre.
-- La double clôture d'une session est bloquée côté base de données.
+### 3.2 Permissions granulaires (42)
+
+Chaque action métier correspond à une permission du type
+`module.ressource.action`, regroupée par domaine :
+
+- **Membres** : `members.view / create / edit`
+- **Épargnes** : `savings.view / create / cancel`
+- **Crédits** : `loans.view / create / edit / cancel`
+- **Remboursements** : `repayments.view / create / cancel`
+- **Comptes** : `accounts.view`, `accounts.block` (geler/réactiver les comptes)
+- **Sessions** : `sessions.view / create / close`
+- **Rapports** : `reports.view / generate / export`
+- **Reçus** : `receipts.view / print / reprint`
+- **Documents** : `documents.view / add_template / edit_template / delete_template / generate / print / export`
+- **Utilisateurs** : `users.view / create / edit / disable / permissions`
+- **Sauvegardes** : `backup.create / restore`
+- **Audit / Paramètres** : `audit.view`, `settings.view / edit`, `settings.financial.edit` (taux, devises autorisées, types de crédit)
+
+### 3.3 Garanties techniques (vérifiées par tests)
+
+- Le rôle `admin` dispose de **toutes** les permissions, quel que soit le
+  catalogue. Modifier le rôle d'un utilisateur met immédiatement à jour
+  ses droits.
+- Les autres comptes = permissions de leur **rôle** + permissions
+  **individuelles** (`user_permission`). Les pages (onglets, boutons,
+  actions) restent masquées ou inaccessibles en l'absence du droit.
+- Le contrôle est **dans la logique métier**, pas seulement à l'écran :
+  même en contournant l'interface, une action interdite est refusée et
+  consignée au journal (`REFUS_ACTION` avec la permission concernée).
+- Les onglets **Comptes**, **Administration**, **Documents** et
+  **Paramètres** n'apparaissent dans la barre latérale que si le compte
+  y a droit.
 
 Recommandation AVEC : 1-2 comptes `admin` (président/trésorier),
-un compte `agent` par caissier, un compte `lecteur` utilisé en assemblée.
+un compte `caissier` par caissier (reçus), ou `agent`, un compte
+`auditeur`/`lecteur` pour les consultations en assemblée.
 
 ---
 
@@ -163,7 +196,30 @@ La base endommagée est écrasée uniquement après votre confirmation.
 
 ---
 
-## 6. Maintenance périodique
+## 6. Paramètres financiers (onglet Paramètres → section « Financiers »)
+
+Réservée aux comptes disposant de `settings.financial.edit`
+(généralement les administrateurs), cette section contrôle la politique
+financière de l'AVEC :
+
+| Champ | Effet |
+|---|---|
+| **Taux d'intérêt** (Ordinaire / Urgence / Investissement) | % annuel appliqué à chaque **nouveau** crédit selon son type |
+| **Taux de pénalité** | % mensuel de pénalité de retard par défaut |
+| **Devises autorisées** | CDF et/ou USD acceptées dans les opérations |
+| **Types de crédit** | types utilisables à l'octroi (Ordinaire, Urgence, Investissement…) |
+
+**Règle essentielle : les taux sont figés à l'octroi.** Chaque crédit
+mémorise son taux au moment de sa création (`taux_penalite` incluse) :
+modifier ces paramètres par la suite **n'affecte jamais** les crédits
+déjà accordés, il ne s'applique qu'aux nouveaux.
+
+Chaque modification est consignée au journal avec l'ancienne et la
+nouvelle valeur (`MODIFIER_PARAMS_FINANCIERS`).
+
+---
+
+## 7. Maintenance périodique
 
 | Fréquence | Action |
 |---|---|
@@ -187,7 +243,7 @@ Résultat attendu : `intégrité : ok`.
 
 ---
 
-## 7. Sécurité
+## 8. Sécurité
 
 **Mots de passe** : PBKDF2-SHA256, 100 000 itérations, sel unique par
 compte. Aucun mot de passe n'apparaît en clair dans la base ni dans les
@@ -213,7 +269,7 @@ sécurisés (armoire fermée, accès réservé aux responsables).
 
 ---
 
-## 8. Dépannage avancé
+## 9. Dépannage avancé
 
 | Symptôme | Cause probable | Action |
 |---|---|---|

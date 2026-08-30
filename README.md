@@ -1,6 +1,6 @@
 # AkibaCore — Système de Gestion AVEC
 
-**Version 2.0.0** | 100 % hors ligne | Simple, sûr, sans connexion Internet
+**Version 2.2.0** | 100 % hors ligne | Simple, sûr, sans connexion Internet
 
 ---
 
@@ -32,6 +32,10 @@ sous Windows ou Linux.
 | Remboursements | Encaisser les paiements : pénalité → intérêt → principal, statut mis à jour automatiquement |
 | Sessions | Numéroter et clôturer chaque réunion de l'association |
 | Rapports | Bilan financier, rapport HTML imprimable, 5 exports CSV (Excel) |
+| **Reçus** | **Reçu numéroté `REC-AAAA-NNNNNN` imprimé ou enregistré en PDF après chaque dépôt, crédit ou remboursement ; réimpression possible** |
+| **Documents** | **Modèles personnalisés par AVEC (DOCX / ODT / HTML / TXT) avec champs `{{VARIABLE}}` remplacés automatiquement : reçus, attestations, rapports…** |
+| **Administration** | **Plusieurs comptes, rôles et permissions granulaires par utilisateur ; journal d'activité filtrable et exportable** |
+| **Paramètres** | **Coordonnées, devise, nombre de parts, taux de l'AVEC ; impression automatique des reçus ; sauvegarde / restauration** |
 | Sécurité | Mots de passe chiffrés, journal d'audit, sauvegardes automatiques |
 
 ---
@@ -116,13 +120,21 @@ pas être conservé. Choisissez-en un que les responsables mémoriseront.
 - La date, votre nom et votre rôle s'affichent en haut de la fenêtre.
 - Pour quitter votre session : bouton « Se déconnecter » en bas à droite.
 
-Trois rôles existent :
+Les utilisateurs disposent désormais de **rôles personnalisables** et de
+**permissions granulaires**. Sept rôles prédéfinis :
 
 | Rôle | Droits |
 |---|---|
-| **admin** | Tout : opérations + utilisateurs + sauvegarde + paramètres |
-| **agent** | Opérations courantes : membres, épargnes, crédits, remboursements, sessions, rapports |
+| **admin** | Tout : opérations + utilisateurs + permissions + documents + paramètres |
+| **agent** | Opérations courantes : membres, épargnes, crédits, remboursements, sessions, reçus, documents, rapports |
+| **caissier** | Épargne, remboursements et reçus imprimés |
+| **gestionnaire_credit** | Crédits et remboursements uniquement |
+| **secretaire** | Membres, sessions et documents |
+| **auditeur** | Lecture seule + rapports + journal d'activité |
 | **lecteur** | Consultation uniquement (aucun bouton d'action visible) |
+
+L'administrateur peut créer des rôles sur mesure et ajuster les
+permissions de chaque compte (onglet **Administration**).
 
 ---
 
@@ -155,12 +167,15 @@ Onglet **Membres** :
 
 Onglet **Épargnes** → **+ Enregistrer dépôt** :
 
-1. Choisir le membre, saisir le montant (FC) et la date.
+1. Choisir le membre, saisir le montant (CDF ou USD) et la date.
 2. Type : `ordinaire` / `solidarite` / `urgence`.
 3. Le total des épargnes valides se met à jour immédiatement.
 
 Une erreur ? Sélectionnez la ligne → **Annuler** : l'opération reste
 dans l'historique marquée annulée (traçabilité complète).
+
+À chaque dépôt, un **reçu** numéroté (`REC-AAAA-NNNNNN`, jamais
+réutilisé) est proposé à l'impression ou en PDF.
 
 ---
 
@@ -177,6 +192,8 @@ Onglet **Crédits** → **+ Octroyer crédit** :
 
 Statuts automatiques : `ACTIF` → `EN RETARD` (après échéance impayée)
 → `SOLDE` (remboursement complet). Un crédit peut aussi être annulé.
+
+L'octroi d'un crédit produit automatiquement son **reçu**.
 
 ---
 
@@ -197,6 +214,9 @@ L'application répartit automatiquement le paiement dans l'ordre légal :
 
 Dès que le total atteint le montant dû, le crédit passe à **SOLDE**
 et le membre peut demander un nouveau crédit.
+
+Le reçu de remboursement détaille la répartition : pénalité, intérêt,
+principal et solde restant.
 
 ---
 
@@ -224,7 +244,42 @@ Les exports CSV s'ouvrent directement dans Excel avec les accents corrects.
 
 ---
 
-## 14. Sauvegarde
+## 14. Reçus et documents
+
+### Reçus (onglet Documents)
+
+- Générés automatiquement après un dépôt, un crédit ou un remboursement.
+- Numérotation `REC-AAAA-NNNNNN` **jamais réutilisée** (même après
+  suppression), pour une traçabilité totale.
+- En-tête personnalisable : nom, adresse, téléphone, devise de votre AVEC.
+- Trois choix après chaque opération : **Imprimer**, **Voir**, ou
+  **Exporter en PDF** (`documents/recus/`).
+- Réimpression possible à tout moment depuis l'historique des reçus.
+- Option « imprimer automatiquement » dans l'onglet **Paramètres**.
+
+### Modèles de documents (onglet Documents)
+
+Votre AVEC peut fournir ses propres modèles **DOCX, ODT, HTML ou TXT**
+(entête, logo, texte) dans lesquels AkibaCore remplace les champs
+`{{VARIABLE}}` automatiquement :
+
+- `{{AVEC_NOM}}`, `{{AVEC_ADRESSE}}`, `{{AVEC_TELEPHONE}}`,
+  `{{AVEC_EMAIL}}`, `{{AVEC_DEVISE}}`
+- `{{MEMBRE_NUMERO}}`, `{{MEMBRE_NOM}}`, `{{MEMBRE_PRENOM}}`,
+  `{{MEMBRE_TELEPHONE}}`, `{{MEMBRE_ADRESSE}}`, `{{MEMBRE_PARTS}}`
+- `{{RECU_NUMERO}}`, `{{TYPE_OPERATION}}`, `{{MONTANT}}`, `{{DATE}}`, `{{HEURE}}`
+- `{{CREDIT_NUMERO}}`, `{{INTERET}}`, `{{PENALITE}}`, `{{PRINCIPAL}}`, `{{SOLDE}}`
+- `{{UTILISATEUR}}`, `{{UTILISATEUR_NOM}}`, `{{UTILISATEUR_ROLE}}`,
+  `{{SESSION_NUMERO}}`, `{{DATE_REUNION}}`
+
+Un **modèle par défaut** peut être défini pour chaque type (Reçu,
+Attestation, Rapport financier, Relevé membre, Bilan, Procès-verbal).
+Documents générés : prévisualisation, impression, export PDF,
+historique.
+
+---
+
+## 15. Sauvegarde
 
 - **Automatique** : toutes les 30 minutes pendant l'utilisation, et à la fermeture.
 - **Manuelle** : bouton « Sauvegarde base de données » (onglet Rapports).
@@ -235,7 +290,7 @@ Les exports CSV s'ouvrent directement dans Excel avec les accents corrects.
 
 ---
 
-## 15. Restauration
+## 16. Restauration
 
 ### Méthode automatique (si la base est endommagée)
 
@@ -255,7 +310,7 @@ Procédure détaillée : GUIDE_ADMINISTRATEUR.md, section Restauration.
 
 ---
 
-## 16. Sécurité
+## 17. Sécurité
 
 - Mots de passe jamais stockés en clair : hachage PBKDF2-SHA256
   (100 000 itérations) + sel aléatoire.
@@ -269,7 +324,7 @@ Procédure détaillée : GUIDE_ADMINISTRATEUR.md, section Restauration.
 
 ---
 
-## 17. Dépannage
+## 18. Dépannage
 
 | Problème | Solution |
 |---|---|
@@ -286,7 +341,7 @@ la fenêtre explique toujours la marche à suivre.
 
 ---
 
-## 18. Désinstallation
+## 19. Désinstallation
 
 Supprimez simplement le dossier du programme.
 
@@ -296,30 +351,41 @@ La désinstallation ne touche à rien d'autre sur l'ordinateur.
 
 ---
 
-## 19. Architecture technique (résumé)
+## 20. Architecture technique (résumé)
 
 | Aspect | Choix |
 |---|---|
 | Langage | Python ≥ 3.8, bibliothèque standard uniquement |
 | Interface | Tkinter (inclus avec Python) |
-| Base de données | SQLite mode WAL, clés étrangères activées, 8 tables, 8 index |
+| Base de données | SQLite mode WAL, clés étrangères activées, migrations `PRAGMA user_version` (0→2), 19 tables |
+| Impression | Imprimantes du système (Linux CUPS `lp`/`lpr`, Windows `startfile print`) + PDF hors ligne sans dépendance |
+| Génération de documents | DOCX / ODT / HTML / TXT traités localement (aucune bibliothèque externe) |
 | Dépendances externes | **Aucune** — fonctionne sans Internet, sans pip |
 | Structure | Application monofichier (`main.py`) |
 | Packaging | PyInstaller (un exécutable autonome par système) |
 
 Tables : `utilisateur`, `avec`, `membre`, `session`, `epargne`,
-`credit`, `remboursement`, `audit_log`.
+`credit`, `remboursement`, `audit_log`, `permission`, `role`,
+`role_permission`, `user_permission`, `receipt`, `document_template`,
+`document_genere`, `compteur` — plus `compte`, `compte_evenement`,
+`compte_mouvement` (ajoutées par la migration v2).
 
 ---
 
-## 20. Tests
+## 21. Tests
 
-Le logiciel est livré avec **192 tests automatisés** (unitaires et
+Le logiciel est livré avec **272 tests automatisés** (unitaires et
 métier), tous passants :
 
 ```bash
-python3 test_finance.py      # 61 tests — moteurs financiers et authentification
-python3 test_complet.py      # 131 tests — scénarios complets, sécurité, sauvegardes
+python3 test_finance.py      #  61 tests — moteurs financiers et authentification
+python3 test_complet.py      # 132 tests — scénarios complets, sécurité, sauvegardes
+python3 test_permissions.py  #  19 tests — permissions, rôles, migration v2.0 → v2.2
+python3 test_recus.py        #  15 tests — numérotation des reçus, tickets, PDF
+python3 test_modeles.py      #  16 tests — modèles DOCX/ODT/HTML/TXT
+python3 test_administration.py # 28 tests — Administration, navigation, devises,
+                              #            comptes, taux, portabilité des données
+python3 test_scenario.py     #   1 test  — scénario utilisateur réel de bout en bout
 # ou : make test
 ```
 
@@ -327,7 +393,13 @@ Validation v2.0.0 effectuée sur Linux : parcours utilisateur complet
 (22 étapes en interface réelle), trois rôles, interruption brutale,
 base corrompue, performance sur 150 membres / 500 crédits / 2000
 remboursements, exécutable autonome. Détails : `RELEASE_NOTES_v2.0.0.md`.
+La mise à jour v2.1.0 a été validée aussi sur la base existante
+(150 membres, 500 crédits) sans perte de données.
+La mise à jour v2.2.0 a été validée sur la même copie de production
+(150 membres / 500 crédits / 2004 remboursements) : migration v1 → v2
+idempotente, intégrité et clés étrangères vérifiées, devise historique
+FC migrée en CDF, pénalités snapshotées par crédit.
 
 ---
 
-*Livraison v2.0.0 — voir RELEASE_NOTES_v2.0.0.md pour l'historique complet.*
+*Livraison v2.2.0 — voir RELEASE_NOTES_v2.0.0.md et RAPPORT_FINAL_RELEASE.md pour l'historique complet.*

@@ -257,10 +257,17 @@ class TestDBSchema完整性(unittest.TestCase):
                    "epargne", "credit", "remboursement", "audit_log"):
             self.assertIn(t, tables, f"Table {t} manquante")
 
-    def test_8_tables_principales(self):
+    def test_tables_principales(self):
+        """19 tables depuis v2.2 : 16 de v2.1 + compte/compte_evenement/compte_mouvement."""
         tables = [r[0] for r in self.db.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()]
-        self.assertEqual(len(tables), 8)
+        attendues = {"utilisateur", "avec", "membre", "session", "epargne",
+                     "credit", "remboursement", "audit_log", "permission",
+                     "role", "role_permission", "user_permission",
+                     "receipt", "document_template", "document_genere", "compteur",
+                     "compte", "compte_evenement", "compte_mouvement"}
+        self.assertEqual(len(tables), len(attendues))
+        self.assertEqual(set(tables), attendues)
 
     def test_foreign_keys_actives(self):
         fk = self.db.valeur("PRAGMA foreign_keys")
@@ -280,10 +287,22 @@ class TestDBSchema完整性(unittest.TestCase):
             self.db.exec("INSERT INTO epargne(membre_id,montant,type) VALUES(1,-100,'ordinaire')")
             self.db.commit()
 
-    def test_check_constraint_role_invalide(self):
+    def test_role_personnalise_accepte(self):
+        """Depuis v2.1, le rôle est libre (plus de CHECK) pour permettre des
+        rôles personnalisés définis par l'administrateur."""
+        self.db.exec(
+            "INSERT INTO utilisateur(nom,login,pwd_hash,sel,role,avec_id) "
+            "VALUES('X','x','h','s','superadmin',1)")
+        self.db.commit()
+        self.assertEqual(
+            self.db.valeur("SELECT role FROM utilisateur WHERE login='x'"), "superadmin")
+
+    def test_check_constraint_role_invalide_fk_avec(self):
+        # Une clé étrangère restante : avec_id doit référencer une AVEC existante.
         with self.assertRaises(Exception):
             self.db.exec(
-                "INSERT INTO utilisateur(nom,login,pwd_hash,sel,role) VALUES('X','x','h','s','superadmin')")
+                "INSERT INTO utilisateur(nom,login,pwd_hash,sel,role,avec_id) "
+                "VALUES('Y','y','h','s','agent',9999)")
             self.db.commit()
 
 

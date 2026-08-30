@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  AkibaCore v2.0.0 — Installation du raccourci dans le menu
+#  AkibaCore v2.2.0 — Installation du raccourci dans le menu
 #  Usage : ./installer_raccourci.sh
 #
 #  Crée le raccourci « AkibaCore » dans le menu des applications

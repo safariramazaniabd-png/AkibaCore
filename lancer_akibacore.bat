@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  AkibaCore v2.0.0 - Script de lancement (Windows 10/11)
+REM  AkibaCore v2.2.0 - Script de lancement (Windows 10/11)
 REM  Double-cliquer sur ce fichier pour lancer l'application.
 REM ============================================================
 
@@ -8,7 +8,7 @@ cd /d "%~dp0"
 
 echo.
 echo   ==============================================
-echo    AkibaCore v2.0.0 - Demarrage
+echo    AkibaCore v2.2.0 - Demarrage
 echo   ==============================================
 echo.
 

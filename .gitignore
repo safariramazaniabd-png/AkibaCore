@@ -222,6 +222,8 @@ akibacore.db
 akibacore.db-wal
 akibacore.db-shm
 sauvegardes/
+documents/
+release/
 
 # AkibaCore — dossiers non tracked
 AkibaCore_SAUVEGARDE/

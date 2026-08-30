@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  Script de compilation AkibaCore v2.0.0 -> exécutable Linux
+#  Script de compilation AkibaCore v2.2.0 -> exécutable Linux
 #  Usage : ./build_linux.sh
 #  Prérequis : Python 3.8+ et python3-tk installés
 # ============================================================

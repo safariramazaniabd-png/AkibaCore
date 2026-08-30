@@ -7,7 +7,7 @@ Conçu pour les Associations Villageoises d'Épargne et de Crédit
 Fonctionne 100 % hors ligne | SQLite | Tkinter
 
 Auteur  : AkibaCore Team
-Version : 2.0.0
+Version : 2.2.0
 """
 
 import sqlite3
@@ -19,6 +19,10 @@ import secrets
 import os
 import sys
 import shutil
+import subprocess
+import tempfile
+import re
+import zipfile
 import csv
 import json
 import html
@@ -42,17 +46,72 @@ def _repertoire_application() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _est_ecrivable(rep: Path) -> bool:
+    """Vérifie si un dossier est réellement accessible en écriture."""
+    try:
+        rep.mkdir(parents=True, exist_ok=True)
+        essai = rep / ".akiba_probe"
+        with open(essai, "w", encoding="utf-8") as f:
+            f.write("ok")
+        essai.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _repertoire_donnees() -> Path:
+    """Dossier des données utilisateur (base + sauvegardes + documents).
+
+    Priorité à côté du programme (portable) si ce dossier est accessible
+    en écriture. Sinon — par exemple après une installation dans
+    "C:\\Program Files\\AkibaCore" que Windows protège en écriture — on
+    bascule vers un dossier personnel de l'utilisateur, lisible en écriture,
+    afin de ne jamais échouer à l'enregistrement des données.
+    """
+    app = _repertoire_application()
+    if _est_ecrivable(app):
+        return app
+    # Dossier personnel portable selon l'OS.
+    for cle in ("LOCALAPPDATA", "APPDATA"):
+        b = os.environ.get(cle)
+        if b:
+            try:
+                return Path(b) / "AkibaCore"
+            except Exception:
+                pass
+    return Path.home() / "Documents" / "AkibaCore"
+
+
 APP_NOM      = "AkibaCore"
-APP_VERSION  = "2.0.0"
+APP_VERSION = "2.2.0"
 REPERTOIRE_APP = _repertoire_application()
-DB_CHEMIN    = str(REPERTOIRE_APP / "akibacore.db")
-BACKUP_DIR   = REPERTOIRE_APP / "sauvegardes"
+REPERTOIRE_DONNEES = _repertoire_donnees()
+DB_CHEMIN    = str(REPERTOIRE_DONNEES / "akibacore.db")
+BACKUP_DIR   = REPERTOIRE_DONNEES / "sauvegardes"
 BACKUP_MAX   = 15
 MDP_DEFAUT   = "admin123"                        # Mot de passe initial admin
 
+DOCUMENTS_DIR = REPERTOIRE_DONNEES / "documents"
+DOC_IN  = DOCUMENTS_DIR / "modeles"
+DOC_REC = DOCUMENTS_DIR / "recus"
+DOC_RAP = DOCUMENTS_DIR / "rapports"
+DOC_ARC = DOCUMENTS_DIR / "archives"
+DOC_GEN = DOCUMENTS_DIR / "generes"
+
 TAUX_INTERET_DEFAUT  = 0.10   # 10 % annuel
 TAUX_PENALITE_DEFAUT = 0.02   # 2 % / mois de retard
-MONTANT_PART_DEFAUT  = 5_000  # FC
+MONTANT_PART_DEFAUT  = 5_000  # CDF
+
+# ── Devises ──────────────────────────────────────────────────────
+# AkibaCore supporte plusieurs devises jamais mélangées dans un calcul
+# sans taux de change. Les soldes sont toujours affichés avec leur devise.
+DEVISES            = ("CDF", "USD")                 # ordre d'affichage
+DEVISE_DEFAUT      = DEVISES[0]                     # CDF — Franc congolais
+DEVISES_AUTORISEES_DEFAUT = (DEVISE_DEFAUT,)        # une seule par défaut
+TYPES_CREDIT       = ("ordinaire", "urgence", "investissement", "autre")
+TYPES_CREDIT_DEFAUT = ("ordinaire", "urgence", "investissement")
+TYPES_COMPTE       = ("epargne", "courant", "bloque", "credit")
+STATUTS_COMPTE     = ("actif", "bloque", "suspendu")
 
 C = {                          # Palette de couleurs etendue
     # Primary
@@ -92,6 +151,110 @@ FONT = None  # Resolu plus tard quand Tk est disponible
 _TENTATIVES_CONNEXION = {}  # {login: (nb_tentatives, timestamp_premiere)}
 _LOCKOUT_SECONDS = 30
 _MAX_TENTATIVES = 5
+
+# ── Permissions granulaires ──────────────────────────────────────
+# Catalogue des permissions disponibles (code, libelle, groupe).
+# L'admin possède TOUTES les permissions quelle que soit cette liste.
+PERMISSIONS = [
+    ("members.view",      "Consulter les membres",               "Membres"),
+    ("members.create",    "Ajouter un membre",                   "Membres"),
+    ("members.edit",      "Modifier un membre",                  "Membres"),
+
+    ("savings.view",      "Consulter les épargnes",              "Épargnes"),
+    ("savings.create",    "Enregistrer une épargne",             "Épargnes"),
+    ("savings.cancel",    "Annuler une épargne",                 "Épargnes"),
+
+    ("loans.view",        "Consulter les crédits",               "Crédits"),
+    ("loans.create",      "Octroyer un crédit",                  "Crédits"),
+    ("loans.edit",        "Modifier un crédit",                  "Crédits"),
+    ("loans.cancel",      "Annuler un crédit",                   "Crédits"),
+
+    ("repayments.view",   "Consulter les remboursements",        "Remboursements"),
+    ("repayments.create", "Enregistrer un remboursement",        "Remboursements"),
+    ("repayments.cancel", "Annuler un remboursement",            "Remboursements"),
+
+    ("sessions.view",     "Consulter les sessions",              "Sessions"),
+    ("sessions.create",   "Créer une session",                   "Sessions"),
+    ("sessions.close",    "Clôturer une session",                "Sessions"),
+
+    ("reports.view",      "Consulter les rapports",              "Rapports"),
+    ("reports.generate",  "Générer les rapports",                "Rapports"),
+    ("reports.export",    "Exporter (CSV / HTML)",               "Rapports"),
+
+    ("receipts.view",     "Consulter les reçus",                 "Reçus"),
+    ("receipts.print",    "Imprimer un reçu",                    "Reçus"),
+    ("receipts.reprint",  "Réimprimer un ancien reçu",           "Reçus"),
+
+    ("documents.view",    "Consulter les documents",             "Documents"),
+    ("documents.add_template",    "Ajouter un modèle",           "Documents"),
+    ("documents.edit_template",   "Modifier un modèle",          "Documents"),
+    ("documents.delete_template", "Supprimer un modèle",         "Documents"),
+    ("documents.generate", "Générer un document",                "Documents"),
+    ("documents.print",    "Imprimer un document",               "Documents"),
+    ("documents.export",   "Exporter un document (PDF)",         "Documents"),
+
+    ("users.view",        "Consulter les utilisateurs",          "Utilisateurs"),
+    ("users.create",      "Créer un utilisateur",                "Utilisateurs"),
+    ("users.edit",        "Modifier un utilisateur",             "Utilisateurs"),
+    ("users.disable",     "Désactiver / réactiver",              "Utilisateurs"),
+    ("users.permissions", "Gérer les permissions",               "Utilisateurs"),
+
+    ("backup.create",     "Créer une sauvegarde",                "Sauvegardes"),
+    ("backup.restore",    "Restaurer une sauvegarde",            "Sauvegardes"),
+
+    ("accounts.view",     "Consulter les comptes",               "Comptes"),
+    ("accounts.block",    "Bloquer / débloquer / suspendre",     "Comptes"),
+
+    ("audit.view",        "Consulter le journal d'activité",     "Audit"),
+    ("settings.view",     "Consulter les paramètres",            "Paramètres"),
+    ("settings.edit",     "Modifier les paramètres",             "Paramètres"),
+    ("settings.financial.edit", "Modifier les paramètres financiers", "Paramètres"),
+]
+
+# Rôles prédéfinis (compatibles avec les anciens 'admin/agent/lecteur').
+# Un rôle = un ensemble de permissions ; l'admin peut en créer d'autres.
+ROLES_DEFAUTS = {
+    "admin":   ("Administrateur", "Tous les droits", [p[0] for p in PERMISSIONS]),
+    "agent":   ("Agent de terrain", "Opérations courantes sans administration",
+                ["members.view", "members.create", "members.edit",
+                 "savings.view", "savings.create", "savings.cancel",
+                 "loans.view", "loans.create", "loans.edit", "loans.cancel",
+                 "repayments.view", "repayments.create", "repayments.cancel",
+                 "sessions.view", "sessions.create", "sessions.close",
+                 "reports.view", "reports.generate", "reports.export",
+                 "receipts.view", "receipts.print", "receipts.reprint",
+                 "documents.view", "documents.generate", "documents.print",
+                 "documents.export",
+                 "backup.create", "accounts.view", "audit.view", "settings.view"]),
+    "lecteur": ("Lecteur", "Consultation seule",
+                ["members.view", "savings.view", "loans.view", "repayments.view",
+                 "sessions.view", "reports.view", "receipts.view",
+                 "documents.view", "audit.view"]),
+    "caissier": ("Caissier", "Épargne, remboursements et reçus",
+                 ["members.view", "savings.view", "savings.create",
+                  "loans.view", "repayments.view", "repayments.create",
+                  "sessions.view", "reports.view", "receipts.view",
+                  "receipts.print", "documents.view", "documents.generate"]),
+    "gestionnaire_credit": ("Gestionnaire des crédits", "Crédits et remboursements",
+                 ["members.view", "savings.view", "loans.view", "loans.create",
+                  "repayments.view", "repayments.create", "repayments.cancel",
+                  "sessions.view", "sessions.create",
+                  "reports.view", "receipts.view", "documents.view"]),
+    "secretaire": ("Secrétaire", "Membres, sessions, documents",
+                 ["members.view", "members.create", "members.edit",
+                  "sessions.view", "sessions.create", "sessions.close",
+                  "reports.view", "reports.generate",
+                  "documents.view", "documents.add_template",
+                  "documents.edit_template", "documents.generate",
+                  "documents.print", "documents.export", "receipts.view"]),
+    "auditeur":  ("Auditeur", "Lecture et rapports",
+                 ["members.view", "savings.view", "loans.view", "repayments.view",
+                  "sessions.view", "reports.view", "reports.generate",
+                  "reports.export", "audit.view", "receipts.view",
+                  "accounts.view", "documents.view"]),
+}
+
+FORMATS_MODELES = {"docx", "odt", "html", "htm", "txt"}
 
 def _resoudre_font(root=None):
     """Choisir la meilleure police disponible selon la plateforme (appele apres Tk init)."""
@@ -304,6 +467,80 @@ class DB:
             details TEXT,
             ts      TEXT DEFAULT (datetime('now','localtime'))
         );
+
+        CREATE TABLE IF NOT EXISTS permission (
+            code    TEXT PRIMARY KEY,
+            libelle TEXT NOT NULL,
+            groupe  TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS role (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom         TEXT UNIQUE NOT NULL,
+            description TEXT,
+            systeme     INTEGER DEFAULT 0,
+            cree_le     TEXT DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS role_permission (
+            role_id INTEGER NOT NULL REFERENCES role(id) ON DELETE CASCADE,
+            code    TEXT    NOT NULL REFERENCES permission(code) ON DELETE CASCADE,
+            PRIMARY KEY(role_id, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_permission (
+            utilisateur_id INTEGER NOT NULL REFERENCES utilisateur(id) ON DELETE CASCADE,
+            code           TEXT    NOT NULL REFERENCES permission(code) ON DELETE CASCADE,
+            PRIMARY KEY(utilisateur_id, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS receipt (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            recu_no      TEXT UNIQUE NOT NULL,
+            type         TEXT NOT NULL,
+            operation    TEXT NOT NULL,
+            operation_id INTEGER,
+            membre_id    INTEGER,
+            avec_id      INTEGER DEFAULT 1,
+            montant      REAL,
+            details      TEXT,
+            cree_par     INTEGER,
+            cree_le      TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY(membre_id) REFERENCES membre(id),
+            FOREIGN KEY(cree_par)  REFERENCES utilisateur(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_template (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            avec_id     INTEGER NOT NULL DEFAULT 1,
+            nom         TEXT NOT NULL,
+            type        TEXT NOT NULL,
+            format      TEXT NOT NULL,
+            fichier     TEXT,
+            contenu     TEXT,
+            par_defaut  INTEGER DEFAULT 0,
+            cree_par    INTEGER,
+            cree_le     TEXT DEFAULT (datetime('now','localtime')),
+            modifie_le  TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY(avec_id) REFERENCES avec(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_genere (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            avec_id      INTEGER NOT NULL DEFAULT 1,
+            template_id  INTEGER,
+            type         TEXT,
+            nom_fichier  TEXT,
+            variables    TEXT,
+            cree_par     INTEGER,
+            cree_le      TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY(template_id) REFERENCES document_template(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS compteur (
+            nom    TEXT PRIMARY KEY,
+            valeur INTEGER NOT NULL DEFAULT 0
+        );
         """)
         c.commit()
         # Index pour performance
@@ -316,13 +553,27 @@ class DB:
             "CREATE INDEX IF NOT EXISTS idx_remboursement_credit ON remboursement(credit_id)",
             "CREATE INDEX IF NOT EXISTS idx_remboursement_membre ON remboursement(membre_id)",
             "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_receipt_membre ON receipt(membre_id)",
+            "CREATE INDEX IF NOT EXISTS idx_receipt_avec ON receipt(avec_id)",
+            "CREATE INDEX IF NOT EXISTS idx_doc_avec ON document_template(avec_id)",
+            "CREATE INDEX IF NOT EXISTS idx_doc_gen_avec ON document_genere(avec_id)",
         ]:
             c.execute(idx_sql)
         c.commit()
+        self._migrer()
         self._seeds()
+        self._seeds_permissions()
 
     def _seeds(self):
         """Données initiales (admin + AVEC par défaut)."""
+        # L'AVEC est initialisée AVANT l'administrateur : utilisateur.avec_id
+        # est une clé étrangère NOT NULL DEFAULT 1 → la ligne avec(id=1) doit
+        # déjà exister au moment de l'insertion.
+        if not self.valeur("SELECT COUNT(*) FROM avec"):
+            self.exec(
+                "INSERT INTO avec(nom,description) VALUES(?,?)",
+                ("AVEC Bukavu", "Association Villageoise d'Épargne et de Crédit"),
+            )
         if not self.valeur("SELECT COUNT(*) FROM utilisateur"):
             sel = secrets.token_hex(16)
             ph  = hashlib.pbkdf2_hmac('sha256', f"admin123{sel}".encode(), sel.encode(), 100000).hex()
@@ -331,12 +582,211 @@ class DB:
                 " VALUES(?,?,?,?,?)",
                 ("Administrateur", "admin", ph, sel, "admin"),
             )
-        if not self.valeur("SELECT COUNT(*) FROM avec"):
-            self.exec(
-                "INSERT INTO avec(nom,description) VALUES(?,?)",
-                ("AVEC Bukavu", "Association Villageoise d'Épargne et de Crédit"),
-            )
         self.commit()
+
+    def _migrer(self):
+        """Migrations SQLite propres, pilotees par PRAGMA user_version.
+
+        La version 0 (base v2.0.0) migre vers la version 1 :
+          - utilisateur : nouveau champ 'derniere_connexion' + 'avec_id',
+            suppression du CHECK limitant les rôles (roles personnalisés) ;
+          - avec : infos complementaires (adresse, telephone, email,
+            devise, logo, impression_auto) ;
+          - nouvelles tables creees par le schema de base.
+        La version 1 migre vers la version 2 (multi-devises + comptes) :
+          - epargne/credit/remboursement/receipt : colonne 'devise' (CDF par défaut) ;
+          - credit : 'type_credit' (ordinaire/urgence/investissement/autre)
+            et 'taux_penalite' (taux figé au moment de l'octroi) ;
+          - avec : taux par type de crédit, devises autorisées, types actifs ;
+          - remplacement de la devise historique 'FC' par 'CDF' ;
+          - nouvelles tables comptes (compte, compte_evenement, compte_mouvement).
+        Aucune donnee existante n'est perdue ; les cles etrangeres restent
+        verifiees a la fin (PRAGMA foreign_key_check).
+        """
+        version = self.valeur("PRAGMA user_version") or 0
+        # ── v0 → v1 ────────────────────────────────────────────────
+        if version < 1:
+            c = self.conn
+            c.execute("PRAGMA foreign_keys=OFF")
+            try:
+                c.execute("BEGIN")
+                # Reconstruit utilisation (sans CHECK restrictif, + colonnes)
+                c.execute("""
+                    CREATE TABLE utilisateur_new (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        nom           TEXT NOT NULL,
+                        login         TEXT UNIQUE NOT NULL,
+                        pwd_hash      TEXT NOT NULL,
+                        sel           TEXT NOT NULL,
+                        role          TEXT NOT NULL DEFAULT 'agent',
+                        actif         INTEGER DEFAULT 1,
+                        avec_id       INTEGER NOT NULL DEFAULT 1,
+                        derniere_connexion TEXT,
+                        cree_le       TEXT DEFAULT (datetime('now','localtime')),
+                        FOREIGN KEY(avec_id) REFERENCES avec(id)
+                    )
+                """)
+                c.execute("""
+                    INSERT INTO utilisateur_new(id,nom,login,pwd_hash,sel,role,actif,cree_le)
+                    SELECT id,nom,login,pwd_hash,sel,role,actif,cree_le FROM utilisateur
+                """)
+                c.execute("DROP TABLE utilisateur")
+                c.execute("ALTER TABLE utilisateur_new RENAME TO utilisateur")
+                # Colonnes complementaires sur 'avec' (si absentes)
+                colonnes = {r[1] for r in c.execute("PRAGMA table_info(avec)")}
+                for col, decl in [
+                    ("adresse", "TEXT"),
+                    ("telephone", "TEXT"),
+                    ("email", "TEXT"),
+                    ("devise", "TEXT DEFAULT 'CDF'"),
+                    ("logo", "TEXT"),
+                    ("impression_auto", "INTEGER DEFAULT 0"),
+                ]:
+                    if col not in colonnes:
+                        c.execute(f"ALTER TABLE avec ADD COLUMN {col} {decl}")
+                c.execute("PRAGMA user_version = 1")
+                c.commit()
+                # Verification d'integrite des cles etrangeres
+                anomalies = c.execute("PRAGMA foreign_key_check").fetchall()
+                if anomalies:
+                    c.rollback()
+            except Exception:
+                c.rollback()
+                raise
+            finally:
+                c.execute("PRAGMA foreign_keys=ON")
+
+        # ── v1 → v2 : multi-devises + comptes ─────────────────────
+        if version < 2:
+            c = self.conn
+            c.execute("PRAGMA foreign_keys=OFF")
+            try:
+                c.execute("BEGIN")
+                # Colonnes de devise sur les opérations (CDF par défaut :
+                # les lignes existantes étaient toutes libellées en FC).
+                for tbl, col, decl in [
+                    ("epargne",      "devise",       "TEXT NOT NULL DEFAULT 'CDF'"),
+                    ("credit",       "devise",       "TEXT NOT NULL DEFAULT 'CDF'"),
+                    ("credit",       "type_credit",  "TEXT NOT NULL DEFAULT 'ordinaire'"),
+                    ("credit",       "taux_penalite","REAL NOT NULL DEFAULT 0.02"),
+                    ("remboursement","devise",       "TEXT NOT NULL DEFAULT 'CDF'"),
+                    ("receipt",      "devise",       "TEXT NOT NULL DEFAULT 'CDF'"),
+                ]:
+                    exist = {r[1] for r in c.execute(f"PRAGMA table_info({tbl})")}
+                    if col not in exist:
+                        c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
+                # Paramètres financiers AVEC (multi-devises, taux par type)
+                colonnes_avec = {r[1] for r in c.execute("PRAGMA table_info(avec)")}
+                for col, decl in [
+                    ("taux_interet_urgence", "REAL DEFAULT 0.15"),
+                    ("taux_interet_investissement", "REAL DEFAULT 0.10"),
+                    ("devises_autorisees",
+                     "TEXT NOT NULL DEFAULT '[\"CDF\"]'"),
+                    ("types_credit",
+                     "TEXT NOT NULL DEFAULT '[\"ordinaire\",\"urgence\",\"investissement\"]'"),
+                ]:
+                    if col not in colonnes_avec:
+                        c.execute(f"ALTER TABLE avec ADD COLUMN {col} {decl}")
+                # La devise historique 'FC' vaut désormais 'CDF' (même monnaie).
+                c.execute("UPDATE avec SET devise='CDF' WHERE devise IN ('FC','')")
+                # Figer la pénalité existante sur les crédits antérieurs
+                # à la v2 (aucun snapshot stocké) : on hérite du taux AVEC.
+                c.execute(
+                    "UPDATE credit SET taux_penalite = COALESCE("
+                    " (SELECT a.taux_penalite FROM avec a ORDER BY a.id LIMIT 1),"
+                    " 0.02)")
+                # Comptes membres (épargne / courant / bloqué / crédit)
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS compte (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        membre_id    INTEGER NOT NULL,
+                        type_compte  TEXT NOT NULL
+                                     CHECK(type_compte IN ('epargne','courant','bloque','credit')),
+                        devise       TEXT NOT NULL DEFAULT 'CDF',
+                        statut       TEXT NOT NULL DEFAULT 'actif'
+                                     CHECK(statut IN ('actif','bloque','suspendu')),
+                        description  TEXT,
+                        cree_par     INTEGER,
+                        cree_le      TEXT DEFAULT (datetime('now','localtime')),
+                        FOREIGN KEY(membre_id) REFERENCES membre(id),
+                        FOREIGN KEY(cree_par)  REFERENCES utilisateur(id),
+                        UNIQUE(membre_id, type_compte, devise)
+                    )
+                """)
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS compte_evenement (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        compte_id     INTEGER NOT NULL,
+                        type_evenement TEXT NOT NULL
+                                       CHECK(type_evenement IN
+                                         ('CREATION','BLOCAGE','DEBLOCAGE',
+                                          'SUSPENSION','REACTIVATION')),
+                        note          TEXT,
+                        cree_par      INTEGER,
+                        cree_le       TEXT DEFAULT (datetime('now','localtime')),
+                        FOREIGN KEY(compte_id) REFERENCES compte(id) ON DELETE CASCADE,
+                        FOREIGN KEY(cree_par)  REFERENCES utilisateur(id)
+                    )
+                """)
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS compte_mouvement (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        compte_id     INTEGER NOT NULL,
+                        type_mouvement TEXT NOT NULL
+                                       CHECK(type_mouvement IN
+                                         ('depot','retrait','ajustement')),
+                        montant       REAL NOT NULL CHECK(montant <> 0),
+                        note          TEXT,
+                        cree_par      INTEGER,
+                        cree_le       TEXT DEFAULT (datetime('now','localtime')),
+                        FOREIGN KEY(compte_id) REFERENCES compte(id) ON DELETE CASCADE,
+                        FOREIGN KEY(cree_par)  REFERENCES utilisateur(id)
+                    )
+                """)
+                for idx_sql in [
+                    "CREATE INDEX IF NOT EXISTS idx_compte_membre ON compte(membre_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_cm_compte ON compte_mouvement(compte_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_ce_compte ON compte_evenement(compte_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_epargne_devise ON epargne(devise)",
+                    "CREATE INDEX IF NOT EXISTS idx_credit_devise ON credit(devise)",
+                ]:
+                    c.execute(idx_sql)
+                c.execute("PRAGMA user_version = 2")
+                c.commit()
+                anomalies = c.execute("PRAGMA foreign_key_check").fetchall()
+                if anomalies:
+                    c.rollback()
+            except Exception:
+                c.rollback()
+                raise
+            finally:
+                c.execute("PRAGMA foreign_keys=ON")
+
+    def _seeds_permissions(self):
+        """Catalogue des permissions + rôles prédéfinis (idempotent).
+
+        Réinsérable à volonté : INSERT OR IGNORE pour ne jamais écraser une
+        permission ou un droit existant, tout en ajoutant les nouveaux codes
+        sur les bases déjà en production (ex. settings.financial.edit).
+        """
+        for code, lib, grp in PERMISSIONS:
+            self.exec("INSERT OR IGNORE INTO permission(code,libelle,groupe) VALUES(?,?,?)",
+                      (code, lib, grp))
+        for nom, (desc, _syst, codes) in ROLES_DEFAUTS.items():
+            role = self.un("SELECT id FROM role WHERE nom=?", (nom,))
+            if not role:
+                self.exec("INSERT INTO role(nom,description,systeme) VALUES(?,?,?)",
+                          (nom, desc, 1))
+                self.commit()
+                role = self.un("SELECT id FROM role WHERE nom=?", (nom,))
+            for code in codes:
+                if code in _CODES_PERMISSIONS:
+                    self.exec("INSERT OR IGNORE INTO role_permission(role_id,code) VALUES(?,?)",
+                              (role["id"], code))
+        self.commit()
+
+
+_CODES_PERMISSIONS = {p[0] for p in PERMISSIONS}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -365,12 +815,91 @@ class Finance:
         return round(cr["montant_total"] - cr["rembourse"], 2)
 
     @staticmethod
-    def solde_epargne(db, membre_id):
+    def solde_epargne(db, membre_id, devise=None):
+        """Épargne valide (non annulée) d'un membre, toutes devises ou une seule."""
+        if devise:
+            return db.valeur(
+                "SELECT COALESCE(SUM(montant),0) FROM epargne"
+                " WHERE membre_id=? AND annule=0 AND devise=?",
+                (membre_id, devise)) or 0
         return db.valeur(
             "SELECT COALESCE(SUM(montant),0) FROM epargne"
             " WHERE membre_id=? AND annule=0",
-            (membre_id,),
-        ) or 0
+            (membre_id,)) or 0
+
+    @staticmethod
+    def solde_compte(db, membre_id, type_compte, devise):
+        """Solde d'un compte membre (épargne/courant/bloqué/crédit) par devise.
+
+        Les soldes des comptes épargne et crédit sont dérivés des tables
+        métier (jamais mélangés entre devises) ; les comptes courant et
+        bloqué s'appuient sur la table compte_mouvement.
+        """
+        if type_compte == "epargne":
+            return Finance.solde_epargne(db, membre_id, devise)
+        if type_compte == "credit":
+            return round(db.valeur(
+                "SELECT COALESCE(SUM(montant_total - rembourse),0) FROM credit"
+                " WHERE membre_id=? AND devise=? AND statut IN ('actif','en_retard')",
+                (membre_id, devise)) or 0, 2)
+        return round(db.valeur("""
+            SELECT COALESCE(SUM(cm.montant),0) FROM compte_mouvement cm
+            JOIN compte c ON cm.compte_id = c.id
+            WHERE c.membre_id=? AND c.type_compte=? AND c.devise=?
+        """, (membre_id, type_compte, devise)) or 0, 2)
+
+    @staticmethod
+    def avoir_compte(db, uid, membre_id, type_compte, devise):
+        """Garantit l'existence du compte membre (type + devise) et son
+        évènement de création. Employé à chaque opération financière pour
+        que tous les comptes apparaissent dans l'écran Comptes."""
+        devise = (devise or DEVISE_DEFAUT).upper()
+        if devise not in DEVISES:
+            devise = DEVISE_DEFAUT
+        db.exec("""
+            INSERT OR IGNORE INTO compte(membre_id,type_compte,devise,statut,description,cree_par)
+            VALUES(?,?,?,?,?,?)
+        """, (membre_id, type_compte, devise, "actif",
+              "Créé automatiquement lors d'une opération", uid))
+        db.commit()
+        compte = db.un(
+            "SELECT * FROM compte WHERE membre_id=? AND type_compte=? AND devise=?",
+            (membre_id, type_compte, devise))
+        if compte and not db.valeur(
+                "SELECT 1 FROM compte_evenement WHERE compte_id=? AND type_evenement='CREATION'",
+                (compte["id"],)):
+            db.exec("INSERT INTO compte_evenement(compte_id,type_evenement,note,cree_par)"
+                    " VALUES(?,'CREATION',?,?)",
+                    (compte["id"], "Compte créé", uid))
+            db.commit()
+        return compte
+
+    @staticmethod
+    def compte_bloque(db, membre_id, type_compte, devise):
+        """True si le compte membre (type+devise) est bloqué ou suspendu."""
+        return bool(db.valeur(
+            "SELECT 1 FROM compte WHERE membre_id=? AND type_compte=? AND devise=?"
+            " AND statut IN ('bloque','suspendu')",
+            (membre_id, type_compte, devise.upper() if isinstance(devise, str) else devise)))
+
+    @staticmethod
+    def impliquer_compte(db, uid, membre_id, type_compte, devise,
+                         type_mouvement, montant, note=None):
+        """Assure le compte puis enregistre un mouvement (depot/retrait/ajustement).
+
+        Retourne le compte ciblé. L'appelant gère la transaction métier ;
+        ce helper ne commit PAS d'opération métier, seulement la création
+        de compte + son événement de création quand nécessaire."""
+        comp = Finance.avoir_compte(db, uid, membre_id, type_compte, devise)
+        if type_mouvement in ("depot", "retrait", "ajustement"):
+            db.exec("""
+                INSERT INTO compte_mouvement(compte_id,type_mouvement,montant,note,cree_par)
+                VALUES(?,?,?,?,?)
+            """, (comp["id"], type_mouvement,
+                  abs(montant) if type_mouvement == "depot" else -abs(montant),
+                  note, uid))
+            db.commit()
+        return comp
 
     @staticmethod
     def date_echeance(date_octroi: date, duree_mois: int) -> date:
@@ -429,6 +958,7 @@ class Auth:
     def __init__(self, db):
         self.db   = db
         self.user = None          # dict de l'utilisateur connecté
+        self._perms = frozenset() # permissions effectives (rôle + individuelles)
 
     def connecter(self, login, mdp):
         u = self.db.un("SELECT * FROM utilisateur WHERE login=? AND actif=1", (login,))
@@ -436,9 +966,52 @@ class Auth:
             return False
         if hashlib.pbkdf2_hmac('sha256', f"{mdp}{u['sel']}".encode(), u['sel'].encode(), 100000).hex() == u["pwd_hash"]:
             self.user = u
+            self._charger_permissions()
+            try:
+                self.db.exec("UPDATE utilisateur SET derniere_connexion=datetime('now','localtime') WHERE id=?", (u["id"],))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
             self.db.audit(u["id"], login, "CONNEXION")
             return True
         return False
+
+    def _charger_permissions(self):
+        """Permissions effectives = rôle (admin ⇒ toutes) + permissions individuelles."""
+        if not self.user:
+            self._perms = frozenset()
+            return
+        self.user = self.db.un("SELECT * FROM utilisateur WHERE id=?", (self.user["id"],))
+        if self.user["role"] == "admin":
+            self._perms = frozenset(p["code"] for p in self.db.tous("SELECT code FROM permission"))
+            return
+        codes = [p["code"] for p in self.db.tous("""
+            SELECT DISTINCT rp.code FROM role_permission rp
+            JOIN role r ON rp.role_id = r.id WHERE r.nom = ?""", (self.user["role"],))]
+        codes += [p["code"] for p in self.db.tous(
+            "SELECT code FROM user_permission WHERE utilisateur_id=?", (self.user["id"],))]
+        self._perms = frozenset(codes)
+
+    def permis(self, code):
+        """L'utilisateur connecté possède-t-il cette permission ?"""
+        return bool(self.user) and (self.user["role"] == "admin" or code in self._perms)
+
+    def exiger(self, code, contexte=None, auditer=True):
+        """Contrôle de permission DANS la logique métier (jamais seulement l'UI).
+
+        Lève PermissionError si l'action est interdite et écrit un REFUS_ACTION
+        dans le journal d'audit pour traçabilité.
+        """
+        if not self.permis(code):
+            if auditer:
+                self.db.audit(self.uid, self.ulogin, "REFUS_ACTION",
+                              details={"permission": code, "contexte": contexte})
+            raise PermissionError(
+                f"Accès refusé : vous n'avez pas la permission « {code} ».\n"
+                "Contactez l'administrateur de l'AVEC.")
+
+    def permissions_effectives(self):
+        return self._perms
 
     def changer_mdp(self, login, ancien, nouveau):
         if not self.connecter(login, ancien):
@@ -448,6 +1021,7 @@ class Auth:
         self.db.exec("UPDATE utilisateur SET pwd_hash=?,sel=? WHERE login=?", (ph, sel, login))
         self.db.commit()
         self.user = self.db.un("SELECT * FROM utilisateur WHERE login=?", (login,))
+        self._charger_permissions()
 
     @property
     def est_admin(self):
@@ -516,6 +1090,573 @@ class Backup:
             except OSError:
                 pass
         return src
+
+
+# ════════════════════════════════════════════════════════════════
+#  IMPRESSION PORTABLE (Windows / Linux CUPS) + PDF MINIMAL
+# ════════════════════════════════════════════════════════════════
+
+class PDFGen:
+    """Générateur PDF hors ligne (polices base-14, zero dependance)."""
+
+    LARGEUR, HAUTEUR = 595, 842          # A4 portrait
+    MARGES = 40
+    TAILLE = 9                            # Courier 9pt
+    INTERLIGNE = 13
+
+    @staticmethod
+    def _ch(texte):
+        return (texte or "").encode("cp1252", errors="replace").decode("latin-1")
+
+    @classmethod
+    def generer(cls, lignes, chemin):
+        """lignes : liste de (texte, bold) ou str simples. Écrit un PDF valide."""
+        items = []
+        for ln in lignes:
+            if isinstance(ln, (tuple, list)):
+                items.append((str(ln[0]), bool(ln[1]) if len(ln) > 1 else False))
+            else:
+                items.append((str(ln), False))
+        max_car = int((cls.LARGEUR - 2 * cls.MARGES) / (cls.TAILLE * 0.6))
+        flux = []
+        for txt, bold in items:
+            if len(txt) <= max_car:
+                flux.append((txt, bold))
+                continue
+            while len(txt) > max_car:
+                flux.append((txt[:max_car], bold))
+                txt = txt[max_car:]
+            flux.append((txt, bold))
+
+        ligne_par_page = int((cls.HAUTEUR - 2 * cls.MARGES) / cls.INTERLIGNE)
+        pages = [flux[i:i + ligne_par_page]
+                 for i in range(0, len(flux), ligne_par_page)] or [[]]
+
+        contenus = []
+        for page in pages:
+            ops = []
+            y = cls.HAUTEUR - cls.MARGES - 6
+            for txt, bold in page:
+                tx = cls._ch(txt)
+                font = "F2" if bold else "F1"
+                ops.append(f"BT /{font} {cls.TAILLE} Tf 1 0 0 1 {cls.MARGES} {y} Tm ({tx}) Tj ET")
+                y -= cls.INTERLIGNE
+            contenus.append("\n".join(ops).encode("latin-1"))
+
+        n = len(pages)
+        p_ids = list(range(5, 5 + n))
+        c_ids = list(range(5 + n, 5 + 2 * n))
+        objets = []
+        objets.append("<< /Type /Catalog /Pages 2 0 R >>")
+        objets.append(f"<< /Type /Pages /Count {n} /Kids [{' '.join(f'{i} 0 R' for i in p_ids)}] >>")
+        objets.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>")
+        objets.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>")
+        for i in range(n):
+            objets.append(
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {cls.LARGEUR} {cls.HAUTEUR}] "
+                f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {c_ids[i]} 0 R >>")
+        for i, data in enumerate(contenus):
+            objets.append((f"<< /Length {len(data)} >>\nstream\n".encode("latin-1")
+                           + data + b"\nendstream"))
+        cls._assembler(objets, chemin)
+
+    @staticmethod
+    def _assembler(objets, chemin):
+        pdf  = b"%PDF-1.4\n"
+        offsets = []
+        for i, o in enumerate(objets, start=1):
+            offsets.append(len(pdf))
+            if isinstance(o, bytes):
+                pdf += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+            else:
+                pdf += ("%d 0 obj\n" % i + str(o) + "\nendobj\n").encode("latin-1")
+        xref = len(pdf)
+        pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objets) + 1)
+        for off in offsets:
+            pdf += ("%010d 00000 n \n" % off).encode("ascii")
+        pdf += ("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+                % (len(objets) + 1, xref)).encode("ascii")
+        Path(chemin).parent.mkdir(parents=True, exist_ok=True)
+        Path(chemin).write_bytes(pdf)
+
+
+class Imprimeur:
+    """Envoie un fichier vers l'imprimante du système (hors ligne)."""
+
+    @staticmethod
+    def imprimer(chemin):
+        if sys.platform == "win32":
+            try:
+                os.startfile(str(chemin), "print")
+                return True
+            except OSError:
+                return False
+        for cmd in (["lp", "-s"], ["lpr"]) if sys.platform != "darwin" else (["lp", "-s"],):
+            try:
+                r = subprocess.run(cmd + [str(chemin)],
+                                   capture_output=True, timeout=120)
+                if r.returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        return False
+
+    @staticmethod
+    def ouvrir(chemin):
+        if sys.platform == "win32":
+            os.startfile(str(chemin))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(chemin)])
+        else:
+            subprocess.Popen(["xdg-open", str(chemin)])
+
+
+# ════════════════════════════════════════════════════════════════
+#  REÇUS — NUMÉROTATION, GÉNÉRATION, IMPRESSION
+# ════════════════════════════════════════════════════════════════
+
+class Recep:
+    """Reçus financiers traçables (numérotation jamais réutilisée)."""
+
+    NEANT = "\u2014"
+    LARGEUR = 40
+
+    @staticmethod
+    def numero_suivant(db, annee=None):
+        """REC-AAAA-NNNNNN unique, jamais réutilisé (compteur persistant).
+
+        Le compteur n'est JAMAIS décrémenté : même si un reçu est supprimé de
+        la base, aucun numéro n'est réattribué — la traçabilité est préservée.
+        Un compteur par année ; si la table compteur est vide (base existante
+        avec des reçus), il est initialisé à partir du maximum déjà émis.
+        """
+        annee = annee or date.today().year
+        prefix = f"REC-{annee}-"
+        nom = f"recu_{annee}"
+        db.exec(
+            "INSERT OR IGNORE INTO compteur(nom,valeur) SELECT ?,"
+            " COALESCE(MAX(CAST(SUBSTR(recu_no,10) AS INTEGER)),0)"
+            " FROM receipt WHERE recu_no LIKE ?",
+            (nom, prefix + "%"))
+        db.commit()
+        valeur = db.valeur("SELECT valeur FROM compteur WHERE nom=?", (nom,)) + 1
+        db.exec("UPDATE compteur SET valeur=? WHERE nom=?", (valeur, nom))
+        db.commit()
+        return f"{prefix}{valeur:06d}"
+
+    @staticmethod
+    def enregistrer(db, uid, ulogin, type_, operation, operation_id,
+                    membre_id, montant, details=None, avec_id=1, devise=None):
+        no = Recep.numero_suivant(db)
+        cur = db.exec(
+            "INSERT INTO receipt(recu_no,type,operation,operation_id,membre_id,"
+            "avec_id,montant,details,devise,cree_par) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (no, type_, operation, operation_id, membre_id, avec_id, montant,
+             json.dumps(details, ensure_ascii=False) if details else None,
+             (devise or DEVISE_DEFAUT).upper(), uid))
+        db.commit()
+        db.audit(uid, ulogin, "CREER_RECU", "receipt", cur.lastrowid,
+                 {"recu_no": no, "type": type_, "montant": montant,
+                  "devise": (devise or DEVISE_DEFAUT).upper()})
+        return db.un("SELECT * FROM receipt WHERE id=?", (cur.lastrowid,))
+
+    @staticmethod
+    def ligne(type_):
+        lib = {"EPARGNE": "DÉPÔT D'ÉPARGNE",
+               "REMBOURSEMENT": "REMBOURSEMENT DE CRÉDIT",
+               "CREDIT": "OCTROI DE CRÉDIT"}
+        return lib.get(type_, type_)
+
+    @staticmethod
+    def texte(r, avec, membre, details=None, utilisateur_nom="",
+              utilisateur_role=""):
+        if not details:
+            # Relecture depuis la base (réimpression, export) : le détail de
+            # la répartition est stocké en JSON au moment de l'opération.
+            try:
+                details = json.loads(r.get("details") or "{}")
+            except (ValueError, TypeError):
+                details = {}
+        dev = (r.get("devise") or avec.get("devise") or DEVISE_DEFAUT).strip() \
+            or DEVISE_DEFAUT
+        L = []
+        L.append("=" * Recep.LARGEUR)
+        L.append(("    %s" % APP_NOM).ljust(Recep.LARGEUR + 4)[:Recep.LARGEUR])
+        L.append(("SYSTÈME AVEC").center(Recep.LARGEUR).strip())
+        L.append("=" * Recep.LARGEUR)
+        L.append((avec.get("nom") or "").center(Recep.LARGEUR).strip())
+        if avec.get("adresse"):
+            L.append(avec["adresse"])
+        if avec.get("telephone"):
+            L.append("Tél : %s" % avec["telephone"])
+        L.append("-" * Recep.LARGEUR)
+        L.append("REÇU N° : %s" % r["recu_no"])
+        ts = r["cree_le"] or ""
+        L.append("Date : %s   Heure : %s" %
+                 (ts[:10] if ts else Recep.NEANT,
+                  ts[11:19] if len(ts) > 11 else Recep.NEANT))
+        L.append("-" * Recep.LARGEUR)
+        L.append("MEMBRE :")
+        L.append("%s — %s" % (membre.get("numero") or Recep.NEANT,
+                              f"{membre['nom']} {membre.get('prenom') or ''}".strip()))
+        L.append("OPÉRATION :")
+        L.append(Recep.ligne(r["type"]))
+        L.append("TYPE : %s" % (r.get("operation") or r["type"]))
+        L.append("MONTANT :")
+        if details and "montant_impute" in details:
+            L.append("%s %s" % (f"{details['montant_impute']:,.0f}", dev))
+        else:
+            L.append("%s %s" % (f"{r['montant'] or 0:,.0f}", dev))
+        if details:
+            for cle, lib in (("penalite", "Pénalité"), ("interet", "Intérêt"),
+                             ("principal", "Principal")):
+                if details.get(cle) is not None:
+                    L.append("%s : %s %s" % (lib, f"{details[cle]:,.0f}", dev))
+            if "solde" in details:
+                L.append("Solde restant : %s %s" % (f"{details['solde']:,.0f}", dev))
+            if "credit_id" in details:
+                L.append("Crédit : CR-%04d" % details["credit_id"])
+            if "date_paiement" in details:
+                L.append("Date paiement : %s" % details["date_paiement"])
+        L.append("-" * Recep.LARGEUR)
+        L.append("Utilisateur : %s %s" % (utilisateur_nom,
+                  f"({utilisateur_role})" if utilisateur_role else ""))
+        L.append("=" * Recep.LARGEUR)
+        L.append(("Merci pour votre confiance.").center(Recep.LARGEUR).strip())
+        L.append(("=" * Recep.LARGEUR))
+        return "\n".join(L)
+
+
+def imprimer_recu(parent, auth, recu, avec, membre, details=None,
+                  utilisateur_nom="", utilisateur_role="", reimprime=False):
+    """Affiche la boite reçu : imprimer / voir / PDF / ne pas imprimer.
+
+    Le reçu est un vrai fichier PDF (documents/recus/…) ; l'impression passe
+    par les imprimantes du système. Jamais d'annulation d'une transaction :
+    l'échec d'impression n'affecte PAS la transaction déjà validée.
+    """
+    from tkinter import scrolledtext
+    texte = Recep.texte(recu, avec, membre, details or {},
+                        utilisateur_nom, utilisateur_role)
+    lignes_pdf = texte.split("\n")
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Reçu généré")
+    dlg.resizable(False, False)
+    dlg.configure(bg=C["blanc"])
+    dlg.grab_set()
+    centrer(dlg, 560, 440)
+
+    tk.Label(dlg, text="Opération enregistrée avec succès.",
+             font=(FONT, 13, "bold"), bg=C["blanc"], fg=C["vert"]).pack(pady=(14, 2))
+    tk.Label(dlg, text="Reçu n° %s — %s" % (recu["recu_no"],
+             Recep.ligne(recu["type"])), font=(FONT, 10), bg=C["blanc"],
+             fg=C["texte_mute"]).pack(pady=(0, 6))
+
+    apercu = scrolledtext.ScrolledText(dlg, width=62, height=14, font=("Courier", 9),
+                                       bg=C["blanc"], fg=C["texte"], relief="flat")
+    apercu.pack(fill="both", expand=True, padx=16)
+    apercu.insert("1.0", texte)
+    apercu.config(state="disabled")
+
+    bande = tk.Frame(dlg, bg=C["blanc"])
+    bande.pack(fill="x", padx=16, pady=12)
+
+    def chemin_pdf():
+        return str(DOC_REC / (recu["recu_no"] + ".pdf"))
+
+    def _imprimer():
+        if reimprime:
+            auth.exiger("receipts.reprint", contexte="réimpression reçu")
+        else:
+            auth.exiger("receipts.print", contexte="impression reçu")
+        pdf_path = chemin_pdf()
+        PDFGen.generer(lignes_pdf, pdf_path)
+        if Imprimeur.imprimer(pdf_path):
+            action = "RECU_REIMPRIME" if reimprime else "RECU_IMPRIME"
+            auth.db.audit(auth.uid, auth.ulogin, action, "receipt", recu["id"],
+                          {"recu_no": recu["recu_no"]})
+            messagebox.showinfo("Impression",
+                                "Reçu envoyé à l'imprimante.", parent=dlg)
+        else:
+            messagebox.showwarning(
+                "Impression indisponible",
+                "Le reçu n'a pas pu être imprimé (aucune imprimante détectée).\n"
+                "La transaction reste enregistrée.\n\n"
+                "Vous pouvez le voir ou l'enregistrer en PDF.", parent=dlg)
+
+    def _voir():
+        pdf_path = chemin_pdf()
+        PDFGen.generer(lignes_pdf, pdf_path)
+        try:
+            Imprimeur.ouvrir(pdf_path)
+        except Exception:
+            messagebox.showinfo("Reçu", texte, parent=dlg)
+
+    def _pdf():
+        pdf_path = chemin_pdf()
+        PDFGen.generer(lignes_pdf, pdf_path)
+        auth.db.audit(auth.uid, auth.ulogin, "RECU_EXPORT_PDF", "receipt",
+                      recu["id"], {"recu_no": recu["recu_no"]})
+        messagebox.showinfo("Export PDF",
+                            "Reçu enregistré dans :\n%s" % pdf_path, parent=dlg)
+
+    b1 = ttk.Button(bande, text="Imprimer le reçu", command=_imprimer, style="Vert.TButton")
+    b1.pack(side="left", padx=4)
+    ttk.Button(bande, text="Voir le reçu", command=_voir,
+               style="Bleu.TButton").pack(side="left", padx=4)
+    ttk.Button(bande, text="Enregistrer en PDF", command=_pdf).pack(side="left", padx=4)
+    ttk.Button(bande, text="Ne pas imprimer", command=dlg.destroy).pack(side="left", padx=4)
+
+    if not (auth.permis("receipts.print" if not reimprime else "receipts.reprint")):
+        b1.config(state="disabled")
+
+
+def gerer_recu_operation(parent, auth, db, avec, membre, type_,
+                         operation, operation_id, montant, details=None,
+                         devise=None):
+    """Flux standard après une opération financière validée (COMMIT déjà fait).
+
+    La transaction est PRIORITAIRE : on ne revient jamais dessus, même si
+    l'impression échoue. Le reçu est stocké (numéro unique) puis :
+      - impression automatique si paramétré ;
+      - sinon boite de dialogue imprimer / voir / PDF / ne pas imprimer.
+    """
+    recu = Recep.enregistrer(db, auth.uid, auth.ulogin, type_, operation,
+                             operation_id, membre["id"], montant, details,
+                             avec["id"], devise)
+    if not auth.permis("receipts.print"):
+        return recu
+    nom_user = (auth.user or {}).get("nom", "")
+    role_user = (auth.user or {}).get("role", "")
+    if int(avec.get("impression_auto") or 0):
+        texte = Recep.texte(recu, avec, membre, details or {}, nom_user, role_user)
+        pdf_path = str(DOC_REC / (recu["recu_no"] + ".pdf"))
+        try:
+            PDFGen.generer(texte.split("\n"), pdf_path)
+            ok = Imprimeur.imprimer(pdf_path)
+        except Exception:
+            ok = False
+        if ok:
+            auth.db.audit(auth.uid, auth.ulogin, "RECU_IMPRIME", "receipt",
+                          recu["id"], {"recu_no": recu["recu_no"]})
+            messagebox.showinfo("Reçu imprimé",
+                                "Le reçu %s a été imprimé automatiquement."
+                                % recu["recu_no"], parent=parent)
+        else:
+            imprimer_recu(parent, auth, recu, avec, membre, details,
+                          nom_user, role_user)
+    else:
+        imprimer_recu(parent, auth, recu, avec, membre, details,
+                      nom_user, role_user)
+    return recu
+
+
+# ════════════════════════════════════════════════════════════════
+#  MODÈLES DE DOCUMENTS PERSONNALISABLES
+# ════════════════════════════════════════════════════════════════
+
+class Modeles:
+    """Modèles de documents fournis par l'AVEC (DOCX / ODT / HTML / TXT).
+
+    Chaque modèle est copié dans documents/modeles/ (l'application continue de
+    fonctionner même si le fichier d'origine est déplacé). Les champs {{VAR}}
+    sont remplacés lors de la génération. Un modèle par défaut peut être défini
+    pour chaque type de document.
+    """
+
+    TYPES = ("Reçu", "Attestation", "Rapport financier", "Relevé membre",
+             "Bilan", "Procès-verbal")
+
+    NAUT = [f"{{{{{p[0]}}}}}".ljust(26) + p[1] for p in [
+        ("AVEC_NOM", "Nom de l'AVEC"),
+        ("AVEC_ADRESSE", "Adresse de l'AVEC"),
+        ("AVEC_TELEPHONE", "Téléphone de l'AVEC"),
+        ("AVEC_EMAIL", "E-mail de l'AVEC"),
+        ("AVEC_DEVISE", "Devise (ex : CDF, USD)"),
+        ("AVEC_DESCRIPTION", "Description de l'AVEC"),
+        ("MEMBRE_NUMERO", "N° du membre"),
+        ("MEMBRE_NOM", "Nom du membre"),
+        ("MEMBRE_PRENOM", "Prénom du membre"),
+        ("MEMBRE_TELEPHONE", "Téléphone du membre"),
+        ("MEMBRE_ADRESSE", "Adresse du membre"),
+        ("MEMBRE_PARTS", "Nombre de parts"),
+        ("RECU_NUMERO", "N° du reçu"),
+        ("DATE", "Date du jour"),
+        ("HEURE", "Heure actuelle"),
+        ("TYPE_OPERATION", "Type d'opération"),
+        ("MONTANT", "Montant en chiffres"),
+        ("CREDIT_NUMERO", "N° du crédit"),
+        ("INTERET", "Intérêt (montant)"),
+        ("PENALITE", "Pénalité (montant)"),
+        ("PRINCIPAL", "Principal (montant)"),
+        ("SOLDE", "Solde restant"),
+        ("UTILISATEUR", "Login de l'utilisateur"),
+        ("UTILISATEUR_NOM", "Nom complet de l'utilisateur"),
+        ("UTILISATEUR_ROLE", "Rôle de l'utilisateur"),
+        ("SESSION_NUMERO", "N° de session"),
+        ("DATE_REUNION", "Date de réunion"),
+        ("DEVISE", "Devise de l'opération (CDF / USD)"),
+    ]]
+
+    @staticmethod
+    def _creer_dossiers():
+        for d in (DOC_IN, DOC_REC, DOC_RAP, DOC_ARC, DOC_GEN):
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+
+    @staticmethod
+    def lire_contenu(chemin):
+        ext = Path(chemin).suffix.lower().lstrip(".")
+        if ext == "docx":
+            with zipfile.ZipFile(str(chemin)) as z:
+                return z.read("word/document.xml").decode("utf-8", "replace")
+        if ext == "odt":
+            with zipfile.ZipFile(str(chemin)) as z:
+                return z.read("content.xml").decode("utf-8", "replace")
+        return Path(chemin).read_text(encoding="utf-8", errors="replace")
+
+    @staticmethod
+    def importer(db, chemin_source, avec_id, nom, type_, cree_par, par_defaut=0):
+        ext = Path(chemin_source).suffix.lower().lstrip(".")
+        if ext not in FORMATS_MODELES:
+            raise ValueError(
+                f"Format « {ext} » non supporté.\nFormats acceptés : {', '.join(sorted(FORMATS_MODELES))}.")
+        if not Path(chemin_source).is_file():
+            raise ValueError("Fichier introuvable.")
+        nom_mod = nom.strip() or Path(chemin_source).stem
+        Modeles._creer_dossiers()
+        horodatage = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nom_fich = re.sub(r"[^A-Za-z0-9_\-]", "_", nom_mod)
+        dest = DOC_IN / f"{avec_id}_{horodatage}_{nom_fich}.{ext}"
+        shutil.copy2(chemin_source, dest)
+        contenu = Modeles.lire_contenu(dest)
+        if par_defaut:
+            db.exec("UPDATE document_template SET par_defaut=0 WHERE avec_id=? AND type=?",
+                    (avec_id, type_))
+        cur = db.exec("""
+            INSERT INTO document_template(avec_id,nom,type,format,fichier,contenu,par_defaut,cree_par)
+            VALUES(?,?,?,?,?,?,?,?)""",
+            (avec_id, nom_mod, type_, ext, str(dest), contenu, 1 if par_defaut else 0, cree_par))
+        db.commit()
+        db.audit(cree_par,
+                 db.un("SELECT login FROM utilisateur WHERE id=?", (cree_par,))["login"] if db.un(
+                     "SELECT login FROM utilisateur WHERE id=?", (cree_par,)) else None,
+                 "AJOUTER_MODELE", "document_template", cur.lastrowid,
+                 {"nom": nom_mod, "type": type_, "format": ext})
+        return cur.lastrowid
+
+    @staticmethod
+    def valeurs_standard(avec, membre=None, recu=None, credit=None,
+                         contexte=None, auth=None):
+        vals = {
+            "AVEC_NOM": avec.get("nom") or "",
+            "AVEC_ADRESSE": avec.get("adresse") or "",
+            "AVEC_TELEPHONE": avec.get("telephone") or "",
+            "AVEC_EMAIL": avec.get("email") or "",
+            "AVEC_DEVISE": (avec.get("devise") or DEVISE_DEFAUT),
+            "AVEC_DESCRIPTION": avec.get("description") or "",
+            "DATE": date.today().strftime("%d/%m/%Y"),
+            "HEURE": datetime.now().strftime("%H:%M"),
+        }
+        if membre:
+            vals.update({
+                "MEMBRE_NUMERO": membre.get("numero") or "",
+                "MEMBRE_NOM": membre.get("nom") or "",
+                "MEMBRE_PRENOM": membre.get("prenom") or "",
+                "MEMBRE_TELEPHONE": membre.get("telephone") or "",
+                "MEMBRE_ADRESSE": membre.get("adresse") or "",
+                "MEMBRE_PARTS": str(membre.get("nb_parts", "")),
+            })
+        if recu:
+            dev = (recu.get("devise") or avec.get("devise") or DEVISE_DEFAUT)
+            vals.update({
+                "RECU_NUMERO": recu.get("recu_no") or "",
+                "TYPE_OPERATION": Recep.ligne(recu.get("type", "")),
+                "MONTANT": f"{recu.get('montant') or 0:,.0f}" if recu.get("montant") else "",
+                "DEVISE": dev,
+            })
+            if recu.get("details"):
+                try:
+                    det = json.loads(recu["details"]) or {}
+                    for cle, fct in (("PENALITE", None), ("INTERET", None),
+                                     ("PRINCIPAL", None), ("SOLDE", None)):
+                        if det.get(cle.lower()) is not None:
+                            vals[cle] = f"{det[cle.lower()]:,.0f}"
+                except Exception:
+                    pass
+        if credit:
+            vals.update({
+                "CREDIT_NUMERO": str(credit.get("id") or ""),
+                "INTERET": f"{credit.get('montant_interet') or 0:,.0f}" if credit.get("montant_interet") else "",
+                "PRINCIPAL": f"{credit.get('principal') or 0:,.0f}" if credit.get("principal") else "",
+                "SOLDE": f"{Finance.solde_credit(credit):,.0f}" if credit.get("montant_total") is not None else "",
+                "DEVISE": credit.get("devise") or avec.get("devise") or DEVISE_DEFAUT,
+            })
+        if auth and auth.user:
+            vals.update({
+                "UTILISATEUR": auth.ulogin or "",
+                "UTILISATEUR_NOM": auth.user.get("nom") or "",
+                "UTILISATEUR_ROLE": auth.user.get("role") or "",
+            })
+        if contexte:
+            vals.update(contexte)
+        if "DEVISE" not in vals:
+            vals["DEVISE"] = avec.get("devise") or DEVISE_DEFAUT
+        return vals
+
+    @staticmethod
+    def substituer(contenu, valeurs):
+        def repl(m):
+            cle = m.group(1).strip()
+            if cle not in valeurs:
+                return m.group(0)
+            return html.escape(str(valeurs[cle]), quote=False)
+        return re.sub(r"\{\{\s*([A-Z_0-9]+)\s*\}\}", repl, contenu)
+
+    @staticmethod
+    def generer(ml, valeurs, sortie):
+        """Applique les variables au modèle stocké et écrit un nouveau fichier."""
+        chemin = ml["fichier"]
+        if isinstance(chemin, str) and not Path(chemin).is_file():
+            raise ValueError(
+                "Le fichier modèle est introuvable sur le disque.\n"
+                "Le modèle a peut-être été supprimé. Réimportez-le depuis la liste.")
+        ext = str(ml["format"] or "").lower().lstrip(".") or \
+              Path(chemin).suffix.lower().lstrip(".")
+        try:
+            contenu = Modeles.lire_contenu(chemin)
+        except OSError:
+            raise ValueError(
+                "Impossible de lire le fichier modèle sur le disque.\n"
+                "Réimportez le modèle pour continuer.")
+        substitue = Modeles.substituer(contenu, valeurs)
+        Path(sortie).parent.mkdir(parents=True, exist_ok=True)
+        if ext in ("docx", "odt"):
+            cible = "word/document.xml" if ext == "docx" else "content.xml"
+            with zipfile.ZipFile(str(chemin)) as zin:
+                donnees = {i.filename: zin.read(i.filename) for i in zin.infolist()}
+            import io
+            with zipfile.ZipFile(sortie, "w", zipfile.ZIP_DEFLATED) as zout:
+                for nomf, data in donnees.items():
+                    if nomf == cible:
+                        data = substitue.encode("utf-8")
+                    zout.writestr(nomf, data)
+            return sortie
+        Path(sortie).write_text(substitue, encoding="utf-8")
+        return sortie
+
+    @staticmethod
+    def texte_apercu(contenu, format_):
+        if format_ in ("html", "htm"):
+            txt = re.sub(r"<script[\s\S]*?</script>", " ", contenu, flags=re.I)
+            txt = re.sub(r"<[^>]+>", " ", txt)
+            return html.unescape(re.sub(r"[ \t]+", " ", txt))
+        txt = contenu.replace("</w:p>", "\n").replace("</text:p>", "\n")
+        txt = re.sub(r"<[^>]+>", "", txt)
+        return html.unescape(re.sub(r"[ \t]+", " ", txt))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -805,6 +1946,7 @@ def treeview(parent, cols, largeurs=None):
     tv.tag_configure("rouge",  background="#FADBD8")
     tv.tag_configure("vert",   background="#D5F5E3")
     tv.tag_configure("orange", background="#FDEBD0")
+    tv.tag_configure("gris",   background="#E5E8E8")
     return tv, f
 
 
@@ -1068,17 +2210,71 @@ class Dashboard(ttk.Frame):
         ttk.Label(hdr, text=f"Tableau de Bord — {APP_NOM}", style="Titre.TLabel").pack(side="left")
         btn(hdr, "Actualiser", self.actualiser, "Bleu.TButton").pack(side="right")
 
-        # Zone scrollable
-        self.corps = tk.Frame(self, bg=C["gris"])
-        self.corps.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        # Zone scrollable : Canvas + barre verticale + molette
+        zone = tk.Frame(self, bg=C["gris"])
+        zone.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        zone.rowconfigure(0, weight=1)
+        zone.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(zone, bg=C["gris"], highlightthickness=0,
+                                yscrollincrement=40)
+        vsb = ttk.Scrollbar(zone, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        self.corps = tk.Frame(self.canvas, bg=C["gris"])
         self.corps.columnconfigure(0, weight=1)
+        self._fen_corps = self.canvas.create_window(
+            (0, 0), window=self.corps, anchor="nw")
+        self.corps.bind("<Configure>",
+                        lambda e: self.canvas.configure(
+                            scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfigure(
+                             self._fen_corps, width=e.width))
         self.actualiser()
+
+    def _molette(self, event):
+        """Fait défiler le tableau de bord avec la molette."""
+        if getattr(event, "num", None) == 4:
+            pas = -2
+        elif getattr(event, "num", None) == 5:
+            pas = 2
+        else:
+            d = getattr(event, "delta", 0)
+            if d == 0:
+                return
+            pas = -2 if d > 0 else 2
+        try:
+            self.canvas.yview_scroll(pas, "units")
+        except tk.TclError:
+            pass
+
+    def _lier_molette(self):
+        """Attache la molette à tous les enfants sauf les zones déjà
+        défilables d'elles-mêmes (Treeview, Listbox, Text)."""
+        def lier(w):
+            if isinstance(w, (ttk.Treeview, tk.Listbox, tk.Text)):
+                return
+            w.bind("<Button-4>", self._molette)
+            w.bind("<Button-5>", self._molette)
+            w.bind("<MouseWheel>", self._molette)
+            for e in w.winfo_children():
+                lier(e)
+        for enfant in self.corps.winfo_children():
+            lier(enfant)
+
+    def _lib_par_devise(d, unite=""):
+        """'1 234 CDF | 50 USD' à partir d'un dict {devise: montant}."""
+        return " | ".join(f"{v:,.0f} {k}" for k, v in sorted(d.items())) if d else f"0 {unite}"
 
     def actualiser(self):
         for w in self.corps.winfo_children():
             w.destroy()
         Finance.maj_statuts(self.db)
         s = self._stats()
+        devises = sorted(set(list(s["epargnes"]) + list(s["rembs"]))
+                         or [DEVISE_DEFAUT])
 
         # ── Ligne 1 : KPI Cards ──
         lbl_frame = tk.Frame(self.corps, bg=C["gris"])
@@ -1088,12 +2284,20 @@ class Dashboard(ttk.Frame):
 
         cartes = [
             ("\u263A", "Membres actifs",         str(s["membres"]),             C["bleu"]),
-            ("\u25C7", "Épargnes totales (FC)",    f"{s['epargnes']:,.0f}",       C["vert"]),
-            ("\u25B6", "Portefeuille crédit (FC)", f"{s['credits_actifs']:,.0f}", "#7D6608"),
-            ("\u25C0", "Remboursé (FC)",           f"{s['rembs']:,.0f}",          "#6C3483"),
+        ]
+        for d in devises:
+            cartes.append(("\u25C7", f"Épargnes {d}",
+                           f"{s['epargnes'].get(d,0):,.0f}", C["vert"]))
+        for d in devises:
+            cartes.append(("\u25B6", f"Crédit actif {d}",
+                           f"{s['credits_actifs'].get(d,0):,.0f}", "#7D6608"))
+        for d in devises:
+            cartes.append(("\u25C0", f"Remboursé {d}",
+                           f"{s['rembs'].get(d,0):,.0f}", "#6C3483"))
+        cartes += [
             ("\u26A0", "Crédits en retard",        str(s["retards"]),             C["rouge"]),
             ("\u25A0", "Sessions ouvertes",        str(s["sessions"]),            "#1A5276"),
-            ("\u25CF", "Solde net (FC)",           f"{s['solde']:,.0f}",
+            ("\u25CF", "Solde net",                f"{s['solde']:,.0f}",
              C["vert"] if s["solde"] >= 0 else C["rouge"]),
             ("\u25CB", "Membres sans crédit",      str(s["sans_credit"]),         "#117A65"),
         ]
@@ -1107,7 +2311,7 @@ class Dashboard(ttk.Frame):
         charts.columnconfigure(0, weight=1)
         charts.columnconfigure(1, weight=1)
 
-        # Bar chart : épargnes vs crédit vs remboursé
+        # Bar chart : épargnes vs crédit vs remboursé (par devise)
         bar_box = tk.Frame(charts, bg=C["blanc"], highlightbackground=C["gris_f"],
                            highlightthickness=1)
         bar_box.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
@@ -1116,12 +2320,15 @@ class Dashboard(ttk.Frame):
                      fill="x", padx=12, pady=(8, 0))
         bar_canvas = tk.Canvas(bar_box, bg=C["blanc"], highlightthickness=0, height=190)
         bar_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        ChartEngine.bar(bar_canvas, [
-            ("Épargnes",    s["epargnes"],       C["vert"]),
-            ("Crédit act.", s["credits_actifs"],  "#7D6608"),
-            ("Remboursé",   s["rembs"],           "#6C3483"),
-            ("Solde net",   max(s["solde"], 0),   C["bleu_clair"]),
-        ])
+        series_bar = []
+        for d in devises:
+            series_bar.append((f"Épargnes {d}", s["epargnes"].get(d, 0), C["vert"]))
+        for d in devises:
+            series_bar.append((f"Crédit {d}", s["credits_actifs"].get(d, 0), "#7D6608"))
+        for d in devises:
+            series_bar.append((f"Remb. {d}", s["rembs"].get(d, 0), "#6C3483"))
+        series_bar.append(("Solde net", max(s["solde"], 0), C["bleu_clair"]))
+        ChartEngine.bar(bar_canvas, series_bar)
 
         # Pie chart : répartition des crédits
         pie_box = tk.Frame(charts, bg=C["blanc"], highlightbackground=C["gris_f"],
@@ -1156,6 +2363,10 @@ class Dashboard(ttk.Frame):
             tv.insert("", "end", values=(l["ts"], l["login"] or "—",
                                          l["action"], l["details"] or ""), tags=(tag,))
 
+        # Molette active sur tout le tableau de bord ; retour en haut
+        self._lier_molette()
+        self.canvas.yview_moveto(0)
+
     def _carte(self, icone, titre, valeur, couleur, parent, row, col):
         c = tk.Frame(parent, bg=couleur)
         c.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
@@ -1170,19 +2381,22 @@ class Dashboard(ttk.Frame):
         db, aid = self.db, self.avec_id
         membres = db.valeur(
             "SELECT COUNT(*) FROM membre WHERE statut='actif' AND avec_id=?", (aid,)) or 0
-        epargnes = db.valeur(
-            "SELECT COALESCE(SUM(e.montant),0) FROM epargne e"
-            " JOIN membre m ON e.membre_id=m.id WHERE m.avec_id=? AND e.annule=0", (aid,)) or 0
-        credits_a = db.valeur(
-            "SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit c"
-            " JOIN membre m ON c.membre_id=m.id"
-            " WHERE m.avec_id=? AND c.statut IN ('actif','en_retard')", (aid,)) or 0
+        epargnes = {r["devise"] or DEVISE_DEFAUT: r["t"] for r in db.tous(
+            "SELECT e.devise AS devise, SUM(e.montant) AS t FROM epargne e"
+            " JOIN membre m ON e.membre_id=m.id WHERE m.avec_id=? AND e.annule=0"
+            " GROUP BY e.devise", (aid,))}
+        credits_a = {r["devise"] or DEVISE_DEFAUT: r["t"] for r in db.tous(
+            "SELECT c.devise AS devise, SUM(c.montant_total-c.rembourse) AS t"
+            " FROM credit c JOIN membre m ON c.membre_id=m.id"
+            " WHERE m.avec_id=? AND c.statut IN ('actif','en_retard')"
+            " GROUP BY c.devise", (aid,))}
         credits_actifs_count = db.valeur(
             "SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id"
             " WHERE m.avec_id=? AND c.statut='actif'", (aid,)) or 0
-        rembs = db.valeur(
-            "SELECT COALESCE(SUM(r.montant_total),0) FROM remboursement r"
-            " JOIN membre m ON r.membre_id=m.id WHERE m.avec_id=? AND r.annule=0", (aid,)) or 0
+        rembs = {r["devise"] or DEVISE_DEFAUT: r["t"] for r in db.tous(
+            "SELECT r.devise AS devise, SUM(r.montant_total) AS t"
+            " FROM remboursement r JOIN membre m ON r.membre_id=m.id"
+            " WHERE m.avec_id=? AND r.annule=0 GROUP BY r.devise", (aid,))}
         retards = db.valeur(
             "SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id"
             " WHERE m.avec_id=? AND c.statut='en_retard'", (aid,)) or 0
@@ -1192,15 +2406,38 @@ class Dashboard(ttk.Frame):
             "SELECT COUNT(*) FROM membre m WHERE avec_id=? AND statut='actif'"
             " AND id NOT IN (SELECT DISTINCT membre_id FROM credit WHERE statut IN ('actif','en_retard'))",
             (aid,)) or 0
-        return dict(membres=membres, epargnes=epargnes, credits_actifs=credits_a,
+        epid = {}; pid = {}
+        for d in set(list(epargnes) + list(credits_a)):
+            epid[d] = epargnes.get(d, 0)
+            pid[d] = credits_a.get(d, 0)
+        solde = sum(epid.values()) - sum(pid.values())
+        return dict(membres=membres, epargnes=epid, credits_actifs=pid,
                     credits_actifs_count=credits_actifs_count,
                     rembs=rembs, retards=retards, sessions=sessions,
-                    solde=epargnes - credits_a, sans_credit=sans_c)
+                    solde=solde, sans_credit=sans_c)
 
 
 # ════════════════════════════════════════════════════════════════
 #  MEMBRES
 # ════════════════════════════════════════════════════════════════
+
+def _soldes_membres(db, avec_id):
+    """Soldes épargne et crédit actifs par membre et par devise (pré-agrégés)."""
+    ep, cr = {}, {}
+    for r in db.tous("""
+            SELECT m.id, e.devise, SUM(e.montant) AS t FROM epargne e
+            JOIN membre m ON e.membre_id=m.id
+            WHERE m.avec_id=? AND e.annule=0
+            GROUP BY m.id, e.devise""", (avec_id,)):
+        ep[(r["id"], r["devise"] or DEVISE_DEFAUT)] = r["t"]
+    for r in db.tous("""
+            SELECT m.id, c.devise, SUM(c.montant_total-c.rembourse) AS t
+            FROM credit c JOIN membre m ON c.membre_id=m.id
+            WHERE m.avec_id=? AND c.statut IN ('actif','en_retard')
+            GROUP BY m.id, c.devise""", (avec_id,)):
+        cr[(r["id"], r["devise"] or DEVISE_DEFAUT)] = r["t"]
+    return ep, cr
+
 
 class OngletMembres(ttk.Frame):
     def __init__(self, parent, db, auth, avec_id=1):
@@ -1215,13 +2452,13 @@ class OngletMembres(ttk.Frame):
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         ttk.Label(bar, text="Gestion des Membres", style="Titre.TLabel").pack(side="left")
-        for txt, cmd, st in [
-            ("+ Ajouter",  self.ajouter,  "Vert.TButton"),
-            ("Modifier",   self.modifier, "Bleu.TButton"),
-            ("Détail",     self.detail,   "TButton"),
-            ("Actualiser", self.actualiser,"TButton"),
+        for txt, cmd, st, perm in [
+            ("+ Ajouter",  self.ajouter,  "Vert.TButton",  "members.create"),
+            ("Modifier",   self.modifier, "Bleu.TButton",  "members.edit"),
+            ("Détail",     self.detail,   "TButton",       "members.view"),
+            ("Actualiser", self.actualiser,"TButton",      "members.view"),
         ]:
-            if self.auth.user["role"] == "lecteur" and txt not in ("Détail", "Actualiser"):
+            if not self.auth.permis(perm):
                 continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
@@ -1235,8 +2472,8 @@ class OngletMembres(ttk.Frame):
 
         # Tableau
         cols = ("ID","N° Membre","Nom complet","Téléphone","Parts",
-                "Épargne FC","Crédit actif FC","Statut","Adhésion")
-        lrg  = [40, 90, 170, 110, 55, 110, 120, 80, 100]
+                "Épargne","Crédit actif","Statut","Adhésion")
+        lrg  = [40, 90, 165, 100, 50, 130, 130, 75, 95]
         self.tv, f = treeview(self, cols, lrg)
         f.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
         self.tv.bind("<Double-1>", lambda e: self.detail())
@@ -1254,25 +2491,30 @@ class OngletMembres(ttk.Frame):
             SELECT m.id, m.numero, m.nom, m.prenom, m.telephone, m.nb_parts, m.statut, m.date_adhesion
             FROM membre m WHERE m.avec_id=? ORDER BY m.nom, m.prenom
         """, (self.avec_id,))
+        ep, cr = _soldes_membres(self.db, self.avec_id)
 
-        total_ep = 0
+        totaux = {}
         nb = 0
         for i, m in enumerate(membres):
             nc = f"{m['nom']} {m['prenom'] or ''}".strip()
             if terme and terme not in (nc + (m["telephone"] or "")).lower():
                 continue
-            ep = Finance.solde_epargne(self.db, m["id"])
-            cr = self.db.valeur(
-                "SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit"
-                " WHERE membre_id=? AND statut IN ('actif','en_retard')", (m["id"],)) or 0
+            mes_ep = {d: v for (mid, d), v in ep.items() if mid == m["id"]}
+            mes_cr = {d: v for (mid, d), v in cr.items() if mid == m["id"]}
+            lab_ep = "  |  ".join(f"{v:,.0f} {d}" for d, v in sorted(mes_ep.items())) \
+                if mes_ep else "—"
+            lab_cr = "  |  ".join(f"{v:,.0f} {d}" for d, v in sorted(mes_cr.items())) \
+                if mes_cr else "—"
             tag = "rouge" if m["statut"] != "actif" else ("p" if i%2==0 else "i")
             self.tv.insert("", "end", iid=str(m["id"]), tags=(tag,), values=(
                 m["id"], m["numero"] or "—", nc, m["telephone"] or "—",
-                m["nb_parts"], f"{ep:,.0f}", f"{cr:,.0f}" if cr else "—",
+                m["nb_parts"], lab_ep, lab_cr,
                 m["statut"].upper(), m["date_adhesion"] or "—"))
-            total_ep += ep
+            for d, v in mes_ep.items():
+                totaux[d] = totaux.get(d, 0) + v
             nb += 1
-        self.v_res.set(f"{nb} membre(s) affiché(s)  |  Épargnes totales : {total_ep:,.0f} FC")
+        aff = "  ·  ".join(f"{v:,.0f} {k}" for k, v in sorted(totaux.items()))
+        self.v_res.set(f"{nb} membre(s) affiché(s)  |  Épargnes totales : {aff or '0'}")
 
     def _sel(self):
         s = self.tv.focus()
@@ -1347,6 +2589,10 @@ class DlgMembre(tk.Toplevel):
 
     def _sauver(self):
         try:
+            if self.m:
+                self.auth.exiger("members.edit", contexte="modification membre")
+            else:
+                self.auth.exiger("members.create", contexte="création membre")
             nom = self.vs["nom"].get().strip()
             if not nom:
                 raise ValueError("Le nom est obligatoire.")
@@ -1388,7 +2634,7 @@ class DlgMembre(tk.Toplevel):
             if self.cb:
                 self.cb()
             self.destroy()
-        except (ValueError, sqlite3.Error) as e:
+        except (PermissionError, ValueError, sqlite3.Error) as e:
             messagebox.showerror("Erreur", str(e), parent=self)
 
 
@@ -1422,47 +2668,125 @@ class DlgDetailMembre(tk.Toplevel):
                 row=r, column=0, sticky="e", padx=(0, 14), pady=4)
             ttk.Label(fi, text=val).grid(row=r, column=1, sticky="w", pady=4)
 
-        epargne_totale = Finance.solde_epargne(self.db, self.m["id"])
-        ttk.Label(fi, text=f"Épargne totale : {epargne_totale:,.0f} FC",
+        devises_ep = [r["devise"] for r in self.db.tous(
+            "SELECT DISTINCT devise FROM epargne WHERE membre_id=? AND annule=0",
+            (self.m["id"],))] or [DEVISE_DEFAUT]
+        lib_ep = "  ·  ".join(
+            f"{Finance.solde_epargne(self.db, self.m['id'], d):,.0f} {d}"
+            for d in sorted(set(devises_ep)))
+        ttk.Label(fi, text=f"Épargne totale : {lib_ep}",
                   font=(FONT, 12, "bold"), foreground=C["vert"],
                   background=C["gris"]).grid(row=9, column=0, columnspan=2, pady=10)
+        dev_cr = [r["devise"] for r in self.db.tous(
+            "SELECT DISTINCT devise FROM credit WHERE membre_id=?", (self.m["id"],))]
+        lib_cr = "  ·  ".join(
+            f"{Finance.solde_compte(self.db, self.m['id'], 'credit', d):,.0f} {d}"
+            for d in dev_cr) or "0"
+        has_debt = any(Finance.solde_compte(self.db, self.m['id'], 'credit', d) > 0
+                       for d in dev_cr)
+        ttk.Label(fi, text=f"Solde crédit actif : {lib_cr}",
+                  font=(FONT, 10, "bold"),
+                  foreground=C["rouge"] if has_debt else C["vert"],
+                  background=C["gris"]).grid(row=10, column=0, columnspan=2, pady=2)
 
         # ─ Épargnes ─
         fe = ttk.Frame(nb)
         nb.add(fe, text="  Épargnes  ")
-        cols = ("Date", "Type", "Montant FC", "Description", "Statut")
-        tv_e, frm_e = treeview(fe, cols, [140, 90, 110, 250, 70])
+        cols = ("Date", "Type", "Montant", "Devise", "Description", "Statut")
+        tv_e, frm_e = treeview(fe, cols, [140, 90, 110, 65, 220, 70])
         frm_e.pack(fill="both", expand=True, padx=4, pady=4)
         eps = self.db.tous(
-            "SELECT date_op,type,montant,description FROM epargne"
+            "SELECT date_op,type,montant,devise,description FROM epargne"
             " WHERE membre_id=? AND annule=0 ORDER BY date_op DESC", (self.m["id"],))
         for i, e in enumerate(eps):
             tv_e.insert("", "end", tags=("p" if i%2==0 else "i",), values=(
                 e["date_op"], e["type"], f"{e['montant']:,.0f}",
+                e["devise"] or DEVISE_DEFAUT,
                 e["description"] or "", "✓"))
 
         # ─ Crédits ─
         fc = ttk.Frame(nb)
         nb.add(fc, text="  Crédits  ")
-        cols2 = ("Octroi", "Principal FC","Intérêt FC","Total FC","Remboursé","Solde","Échéance","Statut")
-        tv_c, frm_c = treeview(fc, cols2, [100,110,100,100,100,100,100,90])
+        cols2 = ("Octroi","Type","Principal","Intérêt","Total","Remboursé","Solde","Devise","Échéance","Statut")
+        tv_c, frm_c = treeview(fc, cols2, [100,110,100,90,100,100,100,60,100,90])
         frm_c.pack(fill="both", expand=True, padx=4, pady=4)
         creds = self.db.tous(
             "SELECT date_octroi,principal,montant_interet,montant_total,rembourse,"
-            "date_echeance,statut FROM credit WHERE membre_id=? ORDER BY date_octroi DESC",
+            "date_echeance,statut,devise,type_credit FROM credit WHERE membre_id=? "
+            "ORDER BY date_octroi DESC",
             (self.m["id"],))
         for i, c in enumerate(creds):
             solde = c["montant_total"] - c["rembourse"]
             tag = "rouge" if c["statut"]=="en_retard" else ("vert" if c["statut"]=="solde" else ("p" if i%2==0 else "i"))
             tv_c.insert("", "end", tags=(tag,), values=(
-                c["date_octroi"], f"{c['principal']:,.0f}", f"{c['montant_interet']:,.0f}",
+                c["date_octroi"], _le_libelle_type_credit(c["type_credit"]),
+                f"{c['principal']:,.0f}", f"{c['montant_interet']:,.0f}",
                 f"{c['montant_total']:,.0f}", f"{c['rembourse']:,.0f}", f"{solde:,.0f}",
+                c["devise"] or DEVISE_DEFAUT,
                 c["date_echeance"], c["statut"].upper()))
 
 
 # ════════════════════════════════════════════════════════════════
 #  ÉPARGNES
 # ════════════════════════════════════════════════════════════════
+
+def _devises_autorisees(avec):
+    """Codes devises autorisées pour une AVEC (colonne JSON ou texte, fallback sûr)."""
+    brut = avec.get("devises_autorisees") or ""
+    brut = brut.strip()
+    if brut.startswith("["):
+        try:
+            brut = ",".join(json.loads(brut))
+        except Exception:
+            brut = ""
+    codes = [c.strip().upper() for c in brut.split(",") if c.strip().upper() in DEVISES]
+    if not codes:
+        codes = list(DEVISES_AUTORISEES_DEFAUT)
+    dev = (avec.get("devise") or DEVISE_DEFAUT).upper()
+    if dev not in codes:
+        codes.insert(0, dev)
+    return codes
+
+
+def _types_credit_avec(avec):
+    """Types de crédit autorisés pour une AVEC (colonne JSON ou texte)."""
+    brut = avec.get("types_credit") or ""
+    brut = brut.strip()
+    if brut.startswith("["):
+        try:
+            brut = ",".join(json.loads(brut))
+        except Exception:
+            brut = ""
+    types = [t.strip() for t in brut.split(",") if t.strip() in TYPES_CREDIT]
+    return types or list(TYPES_CREDIT_DEFAUT)
+
+
+def _le_libelle_type_credit(type_):
+    """Libellé français d'un type de crédit."""
+    return {
+        "ordinaire": "Ordinaire",
+        "urgence": "Urgence",
+        "investissement": "Investissement",
+        "autre": "Autre",
+    }.get(type_, type_ or "Ordinaire")
+
+
+_LIBELLES_COMPTE = {
+    "epargne": "Compte épargne",
+    "courant": "Compte courant",
+    "bloque": "Compte bloqué",
+    "credit": "Compte crédit",
+}
+
+
+def _libelle_compte(type_compte):
+    return _LIBELLES_COMPTE.get(type_compte, type_compte or "—")
+
+
+def _libelle_statut_compte(statut):
+    return {"actif": "Actif", "bloque": "Bloqué",
+            "suspendu": "Suspendu"}.get(statut, statut or "—")
+
 
 class OngletEpargnes(ttk.Frame):
     def __init__(self, parent, db, auth, avec_id=1):
@@ -1475,17 +2799,17 @@ class OngletEpargnes(ttk.Frame):
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         ttk.Label(bar, text="Épargnes", style="Titre.TLabel").pack(side="left")
-        for txt, cmd, st in [
-            ("+ Enregistrer dépôt", self.ajouter,  "Vert.TButton"),
-            ("Annuler opération",   self.annuler,  "Rouge.TButton"),
-            ("Actualiser",          self.actualiser,"TButton"),
+        for txt, cmd, st, perm in [
+            ("+ Enregistrer dépôt", self.ajouter,  "Vert.TButton",   "savings.create"),
+            ("Annuler opération",   self.annuler,  "Rouge.TButton",  "savings.cancel"),
+            ("Actualiser",          self.actualiser,"TButton",       "savings.view"),
         ]:
-            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+            if not self.auth.permis(perm):
                 continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
-        cols = ("ID","Date","Membre","Type","Montant FC","Description","Statut")
-        lrg  = [40, 140, 180, 90, 110, 240, 70]
+        cols = ("ID","Date","Membre","Type","Montant","Devise","Description","Statut")
+        lrg  = [40, 140, 180, 90, 120, 70, 220, 70]
         self.tv, f = treeview(self, cols, lrg)
         f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
 
@@ -1497,21 +2821,24 @@ class OngletEpargnes(ttk.Frame):
         for it in self.tv.get_children():
             self.tv.delete(it)
         rows = self.db.tous("""
-            SELECT e.id, e.date_op, m.nom, m.prenom, e.type, e.montant, e.description, e.annule
+            SELECT e.id, e.date_op, m.nom, m.prenom, e.type, e.montant,
+                   e.devise, e.description, e.annule
             FROM epargne e JOIN membre m ON e.membre_id=m.id
             WHERE m.avec_id=? ORDER BY e.date_op DESC LIMIT 600
         """, (self.avec_id,))
-        total = 0
+        totaux = {}
         for i, r in enumerate(rows):
             nc  = f"{r['nom']} {r['prenom'] or ''}".strip()
+            dev = r["devise"] or DEVISE_DEFAUT
             tag = "rouge" if r["annule"] else ("p" if i%2==0 else "i")
             self.tv.insert("", "end", iid=str(r["id"]), tags=(tag,), values=(
                 r["id"], r["date_op"], nc, r["type"],
-                f"{r['montant']:,.0f}", r["description"] or "",
+                f"{r['montant']:,.0f}", dev, r["description"] or "",
                 "ANNULÉ" if r["annule"] else "✓"))
             if not r["annule"]:
-                total += r["montant"]
-        self.v_res.set(f"Total épargnes valides : {total:,.0f} FC")
+                totaux[dev] = totaux.get(dev, 0) + r["montant"]
+        aff = "  ·  ".join(f"{v:,.0f} {k}" for k, v in sorted(totaux.items()))
+        self.v_res.set(f"Total épargnes valides : {aff or '0'}")
 
     def ajouter(self):
         DlgEpargne(self, self.db, self.auth, self.avec_id, callback=self.actualiser)
@@ -1524,11 +2851,12 @@ class OngletEpargnes(ttk.Frame):
            "Annuler cette opération d'épargne ? Cette action est irréversible.", parent=self):
             return
         try:
+            self.auth.exiger("savings.cancel", contexte="annulation épargne")
             self.db.exec("UPDATE epargne SET annule=1 WHERE id=?", (int(s),))
             self.db.commit()
             self.db.audit(self.auth.uid, self.auth.ulogin, "ANNULER_EPARGNE", "epargne", int(s))
             self.actualiser()
-        except sqlite3.Error as e:
+        except (PermissionError, sqlite3.Error) as e:
             messagebox.showerror("Erreur", str(e))
 
 
@@ -1553,45 +2881,72 @@ class DlgEpargne(tk.Toplevel):
             (self.avec_id,))
         self.mmap = {f"{m['nom']} {m['prenom'] or ''}".strip(): m["id"] for m in membres}
 
+        self.avec = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,)) or {}
+
         ttk.Label(frm, text="Membre *").grid(row=1, column=0, sticky="e", padx=(0,8), pady=5)
         self.v_m = tk.StringVar()
         ttk.Combobox(frm, textvariable=self.v_m, values=list(self.mmap.keys()),
                      state="readonly", width=26).grid(row=1, column=1, sticky="ew", pady=5)
 
-        self.v_mt, _ = champ(frm, "Montant (FC) *",         2)
-        self.v_dt, _ = champ(frm, "Date (AAAA-MM-JJ) *",    3, date.today().isoformat())
+        ttk.Label(frm, text="Devise *").grid(row=2, column=0, sticky="e", padx=(0,8), pady=5)
+        self.v_dev = tk.StringVar(value=(self.avec.get("devise") or DEVISE_DEFAUT).upper())
+        ttk.Combobox(frm, textvariable=self.v_dev,
+                     values=_devises_autorisees(self.avec),
+                     state="readonly", width=26).grid(row=2, column=1, sticky="ew", pady=5)
 
-        ttk.Label(frm, text="Type").grid(row=4, column=0, sticky="e", padx=(0,8), pady=5)
+        self.v_mt, _ = champ(frm, "Montant *",                 3)
+        self.v_dt, _ = champ(frm, "Date (AAAA-MM-JJ) *",       4, date.today().isoformat())
+
+        ttk.Label(frm, text="Type").grid(row=5, column=0, sticky="e", padx=(0,8), pady=5)
         self.v_ty = tk.StringVar(value="ordinaire")
         ttk.Combobox(frm, textvariable=self.v_ty,
                      values=["ordinaire","solidarite","urgence"],
-                     state="readonly", width=26).grid(row=4, column=1, sticky="ew", pady=5)
+                     state="readonly", width=26).grid(row=5, column=1, sticky="ew", pady=5)
 
-        self.v_dc, _ = champ(frm, "Description", 5)
+        self.v_dc, _ = champ(frm, "Description", 6)
 
         bf = ttk.Frame(frm)
-        bf.grid(row=6, column=0, columnspan=2, pady=16)
+        bf.grid(row=7, column=0, columnspan=2, pady=16)
         btn(bf, "Enregistrer", self._sauver, "Vert.TButton").pack(side="left", padx=8)
         btn(bf, "Annuler", self.destroy).pack(side="left", padx=8)
 
     def _sauver(self):
         try:
+            self.auth.exiger("savings.create", contexte="dépôt épargne")
             nom = self.v_m.get()
             if not nom or nom not in self.mmap:
                 raise ValueError("Sélectionnez un membre.")
+            mid = self.mmap[nom]
             mt = Finance.valider_montant(self.v_mt.get())
             dt = Finance.valider_date(self.v_dt.get())
+            devise = self.v_dev.get().strip().upper() or DEVISE_DEFAUT
+            if Finance.compte_bloque(self.db, mid, "epargne", devise):
+                raise ValueError(
+                    f"Opération impossible : le compte épargne {devise} du membre "
+                    "est bloqué ou suspendu.")
             cur = self.db.exec("""
-                INSERT INTO epargne(membre_id,montant,type,date_op,description,cree_par)
-                VALUES(?,?,?,?,?,?)
-            """, (self.mmap[nom], mt, self.v_ty.get(), dt.isoformat(),
-                  self.v_dc.get().strip() or None, self.auth.uid))
+                INSERT INTO epargne(membre_id,montant,type,date_op,description,
+                                    cree_par,devise)
+                VALUES(?,?,?,?,?,?,?)
+            """, (mid, mt, self.v_ty.get(), dt.isoformat(),
+                  self.v_dc.get().strip() or None, self.auth.uid, devise))
             self.db.commit()
+            Finance.impliquer_compte(self.db, self.auth.uid, mid, "epargne",
+                                     devise, "depot", mt,
+                                     f"Dépôt d'épargne ({nom})")
             self.db.audit(self.auth.uid, self.auth.ulogin, "AJOUTER_EPARGNE",
-                          "epargne", cur.lastrowid, {"membre": nom, "montant": mt})
+                          "epargne", cur.lastrowid,
+                          {"membre": nom, "montant": mt, "devise": devise})
+            membre = self.db.un("SELECT * FROM membre WHERE id=?", (mid,))
+            avec   = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,))
+            gerer_recu_operation(self, self.auth, self.db, avec, membre,
+                                 "EPARGNE", self.v_ty.get(), cur.lastrowid, mt,
+                                 {"membre": nom, "montant": mt, "devise": devise,
+                                  "date_paiement": dt.isoformat()},
+                                 devise=devise)
             if self.cb: self.cb()
             self.destroy()
-        except (ValueError, sqlite3.Error) as e:
+        except (PermissionError, ValueError, sqlite3.Error) as e:
             messagebox.showerror("Erreur", str(e), parent=self)
 
 
@@ -1610,17 +2965,18 @@ class OngletCredits(ttk.Frame):
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         ttk.Label(bar, text="Crédits / Prêts", style="Titre.TLabel").pack(side="left")
-        for txt, cmd, st in [
-            ("+ Octroyer crédit", self.ajouter,   "Vert.TButton"),
-            ("Actualiser",        self.actualiser, "TButton"),
+        for txt, cmd, st, perm in [
+            ("+ Octroyer crédit", self.ajouter,   "Vert.TButton",   "loans.create"),
+            ("Annuler crédit",    self.annuler,   "Rouge.TButton",  "loans.cancel"),
+            ("Actualiser",        self.actualiser, "TButton",       "loans.view"),
         ]:
-            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+            if not self.auth.permis(perm):
                 continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
-        cols = ("ID","Membre","Principal FC","Intérêt FC","Total dû FC",
-                "Remboursé FC","Solde FC","Durée","Échéance","Statut")
-        lrg  = [40, 170, 110, 100, 100, 100, 100, 65, 100, 110]
+        cols = ("ID","Membre","Type","Principal","Intérêt","Total dû","Remboursé",
+            "Solde","Devise","Durée","Échéance","Statut")
+        lrg  = [40, 160, 110, 100, 90, 100, 100, 100, 60, 60, 90, 105]
         self.tv, f = treeview(self, cols, lrg)
         f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
 
@@ -1634,14 +2990,15 @@ class OngletCredits(ttk.Frame):
             self.tv.delete(it)
         rows = self.db.tous("""
             SELECT c.id, m.nom, m.prenom, c.principal, c.montant_interet, c.montant_total,
-                   c.rembourse, c.duree_mois, c.date_echeance, c.statut
+                   c.rembourse, c.duree_mois, c.date_echeance, c.statut, c.devise, c.type_credit
             FROM credit c JOIN membre m ON c.membre_id=m.id
             WHERE m.avec_id=? ORDER BY c.date_octroi DESC
         """, (self.avec_id,))
-        total_pf = 0
+        totaux = {}
         for i, r in enumerate(rows):
             solde = r["montant_total"] - r["rembourse"]
             nc    = f"{r['nom']} {r['prenom'] or ''}".strip()
+            dev   = r["devise"] or DEVISE_DEFAUT
             jr    = Finance.jours_retard(r["date_echeance"])
             statut_aff = r["statut"].upper()
             if r["statut"] == "en_retard":
@@ -1650,15 +3007,44 @@ class OngletCredits(ttk.Frame):
                    "vert"  if r["statut"]=="solde"     else
                    "p" if i%2==0 else "i")
             self.tv.insert("", "end", iid=str(r["id"]), tags=(tag,), values=(
-                r["id"], nc, f"{r['principal']:,.0f}", f"{r['montant_interet']:,.0f}",
+                r["id"], nc, _le_libelle_type_credit(r["type_credit"]),
+                f"{r['principal']:,.0f}", f"{r['montant_interet']:,.0f}",
                 f"{r['montant_total']:,.0f}", f"{r['rembourse']:,.0f}", f"{solde:,.0f}",
-                f"{r['duree_mois']} mois", r["date_echeance"], statut_aff))
+                dev, f"{r['duree_mois']} mois", r["date_echeance"], statut_aff))
             if r["statut"] in ("actif","en_retard"):
-                total_pf += solde
-        self.v_res.set(f"Portefeuille crédit actif : {total_pf:,.0f} FC")
+                totaux[dev] = totaux.get(dev, 0) + solde
+        aff = "  ·  ".join(f"{v:,.0f} {k}" for k, v in sorted(totaux.items()))
+        self.v_res.set(f"Portefeuille crédit actif : {aff or '0'}")
 
     def ajouter(self):
         DlgCredit(self, self.db, self.auth, self.avec_id, callback=self.actualiser)
+
+    def annuler(self):
+        s = self.tv.focus()
+        if not s:
+            messagebox.showwarning("Sélection", "Sélectionnez un crédit."); return
+        cr = self.db.un("SELECT * FROM credit WHERE id=?", (int(s),))
+        if not cr:
+            return
+        if cr["statut"] not in ("actif", "en_retard"):
+            messagebox.showwarning("Annulation",
+                                   "Ce crédit n'est plus actif (annulé/soldé).")
+            return
+        if not messagebox.askyesno(
+                "Confirmer annulation",
+                "Annuler ce crédit ? Le montant reste traçable dans l'historique.\n"
+                "Cette action est irréversible.", parent=self):
+            return
+        try:
+            self.auth.exiger("loans.cancel", contexte="annulation crédit")
+            self.db.exec("UPDATE credit SET statut='annule' WHERE id=? AND "
+                         "statut IN ('actif','en_retard')", (int(s),))
+            self.db.commit()
+            self.db.audit(self.auth.uid, self.auth.ulogin, "ANNULER_CREDIT",
+                          "credit", int(s), {"membre_id": cr["membre_id"]})
+            self.actualiser()
+        except (PermissionError, sqlite3.Error) as e:
+            messagebox.showerror("Erreur", str(e))
 
 
 class DlgCredit(tk.Toplevel):
@@ -1677,6 +3063,8 @@ class DlgCredit(tk.Toplevel):
         ttk.Label(frm, text="Octroyer un crédit", style="Sub.TLabel").grid(
             row=0, column=0, columnspan=2, pady=(0, 14))
 
+        self.avec = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,)) or {}
+
         membres = self.db.tous(
             "SELECT id,nom,prenom FROM membre WHERE avec_id=? AND statut='actif' ORDER BY nom",
             (self.avec_id,))
@@ -1687,25 +3075,66 @@ class DlgCredit(tk.Toplevel):
         ttk.Combobox(frm, textvariable=self.v_m, values=list(self.mmap.keys()),
                      state="readonly", width=26).grid(row=1, column=1, sticky="ew", pady=5)
 
-        self.v_p, _  = champ(frm, "Montant principal (FC) *", 2)
-        self.v_t, _  = champ(frm, "Taux annuel (ex: 0.10 = 10%) *", 3,
-                             str(TAUX_INTERET_DEFAUT))
-        self.v_d, _  = champ(frm, "Durée (mois) *", 4, "3")
-        self.v_dt, _ = champ(frm, "Date d'octroi (AAAA-MM-JJ) *", 5, date.today().isoformat())
-        self.v_dc, _ = champ(frm, "Description / Motif", 6)
+        ttk.Label(frm, text="Devise *").grid(row=2, column=0, sticky="e", padx=(0,8), pady=5)
+        self.v_dev = tk.StringVar(value=(self.avec.get("devise") or DEVISE_DEFAUT).upper())
+        ttk.Combobox(frm, textvariable=self.v_dev,
+                     values=_devises_autorisees(self.avec),
+                     state="readonly", width=26).grid(row=2, column=1, sticky="ew", pady=5)
+
+        ttk.Label(frm, text="Type de crédit *").grid(row=3, column=0, sticky="e", padx=(0,8), pady=5)
+        self.type_map = {t: _le_libelle_type_credit(t) for t in _types_credit_avec(self.avec)}
+        self.v_ty = tk.StringVar()
+        self.cb_ty = ttk.Combobox(frm, textvariable=self.v_ty,
+                                  values=[f"{c} — {l}" for c, l in self.type_map.items()],
+                                  state="readonly", width=26)
+        self.cb_ty.grid(row=3, column=1, sticky="ew", pady=5)
+        if self.type_map:
+            self.v_ty.set(f"{list(self.type_map.items())[0][0]} — {list(self.type_map.items())[0][1]}")
+
+        self.v_p, _  = champ(frm, "Montant principal *", 4)
+        self.v_t, _  = champ(frm, "Taux annuel (ex: 0.10 = 10%) *", 5,
+                             str(self.avec.get("taux_interet") or TAUX_INTERET_DEFAUT))
+        self.v_d, _  = champ(frm, "Durée (mois) *", 6, "3")
+        self.v_dt, _ = champ(frm, "Date d'octroi (AAAA-MM-JJ) *", 7, date.today().isoformat())
+
+        self.v_pen_info = tk.StringVar(
+            value=f"Pénalité de retard figée à l'octroi : "
+                  f"{float(self.avec.get('taux_penalite') or TAUX_PENALITE_DEFAUT)*100:.2f} %/mois")
+        ttk.Label(frm, textvariable=self.v_pen_info, foreground=C["bleu"],
+                  font=(FONT, 9, "italic"), background=C["gris"]).grid(
+            row=8, column=0, columnspan=2, pady=2)
+
+        self.v_dc, _ = champ(frm, "Description / Motif", 9)
 
         # Aperçu
         self.v_ap = tk.StringVar()
         ttk.Label(frm, textvariable=self.v_ap, foreground=C["bleu"],
                   font=(FONT, 10, "italic"), background=C["gris"]).grid(
-            row=7, column=0, columnspan=2, pady=4)
+            row=10, column=0, columnspan=2, pady=4)
         for v in (self.v_p, self.v_t, self.v_d):
             v.trace("w", lambda *a: self._apercu())
+        self.cb_ty.bind("<<ComboboxSelected>>", lambda e: (self._taux_par_type(), self._apercu()))
 
         bf = ttk.Frame(frm)
-        bf.grid(row=8, column=0, columnspan=2, pady=16)
+        bf.grid(row=11, column=0, columnspan=2, pady=16)
         btn(bf, "Octroyer", self._sauver, "Vert.TButton").pack(side="left", padx=8)
         btn(bf, "Annuler", self.destroy).pack(side="left", padx=8)
+
+    def _type_selectionne(self):
+        typ = self.v_ty.get().split(" — ")[0].strip()
+        return typ if typ in TYPES_CREDIT else "ordinaire"
+
+    def _taux_par_type(self):
+        with_atuts = self.avec.get("taux_interet") or TAUX_INTERET_DEFAUT
+        tax = {
+            "ordinaire": with_atuts,
+            "urgence": self.avec.get("taux_interet_urgence") or TAUX_INTERET_DEFAUT + 0.05,
+            "investissement": self.avec.get("taux_interet_investissement")
+                              or with_atuts,
+            "autre": with_atuts,
+        }
+        taux = tax.get(self._type_selectionne(), with_atuts)
+        self.v_t.set(str(taux))
 
     def _apercu(self):
         try:
@@ -1714,12 +3143,16 @@ class DlgCredit(tk.Toplevel):
             d = int(self.v_d.get() or 0)
             if p > 0 and 0 < t <= 1 and d > 0:
                 inter = Finance.interet_simple(p, t, d)
-                self.v_ap.set(f"Intérêt : {inter:,.0f} FC  |  Total : {p+inter:,.0f} FC")
+                dev   = self.v_dev.get().strip().upper() or DEVISE_DEFAUT
+                self.v_ap.set(
+                    f"Intérêt : {inter:,.0f} {dev}  |  Total dû : {p+inter:,.0f} {dev}"
+                    f"  —  {_le_libelle_type_credit(self._type_selectionne())}")
         except Exception:
             self.v_ap.set("")
 
     def _sauver(self):
         try:
+            self.auth.exiger("loans.create", contexte="octroi crédit")
             nom = self.v_m.get()
             if not nom or nom not in self.mmap:
                 raise ValueError("Sélectionnez un membre.")
@@ -1732,39 +3165,65 @@ class DlgCredit(tk.Toplevel):
             if dur < 1:
                 raise ValueError("La durée doit être >= 1 mois.")
             do   = Finance.valider_date(self.v_dt.get())
+            devise = self.v_dev.get().strip().upper() or DEVISE_DEFAUT
+            typ  = self._type_selectionne()
+            if Finance.compte_bloque(self.db, mid, "credit", devise):
+                raise ValueError(
+                    f"Impossible d'octroyer un crédit : le compte crédit {devise} "
+                    "du membre est bloqué ou suspendu.")
+            taux_pen = self.avec.get("taux_penalite") \
+                if self.avec.get("taux_penalite") else TAUX_PENALITE_DEFAUT
             inter = Finance.interet_simple(p, t, dur)
             total = round(p + inter, 2)
             ech   = Finance.date_echeance(do, dur)
 
-            # Vérifier que le membre n'a pas déjà un crédit actif (blocage dur)
+            # Vérifier que le membre n'a pas déjà un crédit actif dans la même
+            # devise (blocage dur) — les devises restent indépendantes.
             solde_actuel = self.db.valeur(
                 "SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit"
-                " WHERE membre_id=? AND statut IN ('actif','en_retard')", (mid,)) or 0
+                " WHERE membre_id=? AND devise=? AND statut IN ('actif','en_retard')",
+                (mid, devise)) or 0
             if solde_actuel > 0:
                 raise ValueError(
-                    f"Impossible d'octroyer un nouveau crédit.\n"
-                    f"Ce membre a déjà {solde_actuel:,.0f} FC de crédit actif.\n"
+                    f"Impossible d'octroyer un nouveau crédit en {devise}.\n"
+                    f"Ce membre a déjà {solde_actuel:,.0f} {devise} de crédit actif.\n"
                     "Le crédit actuel doit être soldé avant d'en obtenir un nouveau.")
 
             cur = self.db.exec("""
                 INSERT INTO credit(membre_id,principal,taux,duree_mois,date_octroi,date_echeance,
-                montant_interet,montant_total,description,cree_par)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                montant_interet,montant_total,description,cree_par,devise,type_credit,taux_penalite)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (mid, p, t, dur, do.isoformat(), ech.isoformat(),
-                  inter, total, self.v_dc.get().strip() or None, self.auth.uid))
+                  inter, total, self.v_dc.get().strip() or None, self.auth.uid,
+                  devise, typ, taux_pen))
             self.db.commit()
+            Finance.impliquer_compte(self.db, self.auth.uid, mid, "credit",
+                                     devise, "ajustement", -p,
+                                     f"Octroi de crédit {typ}")
             self.db.audit(self.auth.uid, self.auth.ulogin, "OCTROYER_CREDIT",
                           "credit", cur.lastrowid,
-                          {"membre": nom, "principal": p, "taux": t, "echeance": ech.isoformat()})
+                          {"membre": nom, "principal": p, "taux": t,
+                           "type": typ, "devise": devise,
+                           "echeance": ech.isoformat()})
             messagebox.showinfo("Crédit octroyé",
                 f"Crédit enregistré avec succès.\n\n"
-                f"Principal  : {p:,.0f} FC\n"
-                f"Intérêt    : {inter:,.0f} FC\n"
-                f"Total dû   : {total:,.0f} FC\n"
-                f"Échéance   : {ech.isoformat()}", parent=self)
+                f"Type      : {_le_libelle_type_credit(typ)}\n"
+                f"Principal : {p:,.0f} {devise}\n"
+                f"Intérêt   : {inter:,.0f} {devise}\n"
+                f"Total dû  : {total:,.0f} {devise}\n"
+                f"Échéance  : {ech.isoformat()}", parent=self)
+            membre = self.db.un("SELECT * FROM membre WHERE id=?", (mid,))
+            avec   = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,))
+            gerer_recu_operation(self, self.auth, self.db, avec, membre,
+                                 "CREDIT", "Octroi de crédit", cur.lastrowid, p,
+                                 {"credit_id": cur.lastrowid, "principal": p,
+                                  "interet": inter, "solde": total,
+                                  "type": typ, "devise": devise,
+                                  "date_octroi": do.isoformat()},
+                                 devise=devise)
             if self.cb: self.cb()
             self.destroy()
-        except (ValueError, sqlite3.Error) as e:
+        except (PermissionError, ValueError, sqlite3.Error) as e:
             messagebox.showerror("Erreur", str(e), parent=self)
 
 
@@ -1783,17 +3242,18 @@ class OngletRemboursements(ttk.Frame):
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         ttk.Label(bar, text="Remboursements", style="Titre.TLabel").pack(side="left")
-        for txt, cmd, st in [
-            ("+ Enregistrer paiement", self.ajouter,   "Vert.TButton"),
-            ("Actualiser",             self.actualiser, "TButton"),
+        for txt, cmd, st, perm in [
+            ("+ Enregistrer paiement", self.ajouter,   "Vert.TButton",   "repayments.create"),
+            ("Annuler opération",     self.annuler,    "Rouge.TButton",  "repayments.cancel"),
+            ("Actualiser",             self.actualiser, "TButton",       "repayments.view"),
         ]:
-            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+            if not self.auth.permis(perm):
                 continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
-        cols = ("ID","Date","Membre","Crédit#","Principal FC","Intérêt FC",
-                "Pénalité FC","Total payé FC","Description")
-        lrg  = [40, 140, 170, 65, 100, 100, 100, 120, 220]
+        cols = ("ID","Date","Membre","Crédit#","Principal","Intérêt",
+                "Pénalité","Total payé","Devise","Description")
+        lrg  = [40, 140, 170, 65, 100, 90, 90, 110, 60, 220]
         self.tv, f = treeview(self, cols, lrg)
         f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
 
@@ -1807,25 +3267,66 @@ class OngletRemboursements(ttk.Frame):
         rows = self.db.tous("""
             SELECT r.id, r.date_paiement, m.nom, m.prenom, r.credit_id,
                    r.mont_principal, r.mont_interet, r.mont_penalite,
-                   r.montant_total, r.description, r.annule
+                   r.montant_total, r.devise, r.description, r.annule
             FROM remboursement r JOIN membre m ON r.membre_id=m.id
             WHERE m.avec_id=? ORDER BY r.date_paiement DESC LIMIT 600
         """, (self.avec_id,))
-        total = 0
+        totaux = {}
         for i, r in enumerate(rows):
             nc  = f"{r['nom']} {r['prenom'] or ''}".strip()
+            dev = r["devise"] or DEVISE_DEFAUT
             tag = "rouge" if r["annule"] else ("p" if i%2==0 else "i")
             self.tv.insert("", "end", iid=str(r["id"]), tags=(tag,), values=(
                 r["id"], r["date_paiement"], nc, r["credit_id"],
                 f"{r['mont_principal']:,.0f}", f"{r['mont_interet']:,.0f}",
-                f"{r['mont_penalite']:,.0f}", f"{r['montant_total']:,.0f}",
+                f"{r['mont_penalite']:,.0f}", f"{r['montant_total']:,.0f}", dev,
                 r["description"] or ""))
             if not r["annule"]:
-                total += r["montant_total"]
-        self.v_res.set(f"Total encaissé (remboursements valides) : {total:,.0f} FC")
+                totaux[dev] = totaux.get(dev, 0) + r["montant_total"]
+        aff = "  ·  ".join(f"{v:,.0f} {k}" for k, v in sorted(totaux.items()))
+        self.v_res.set(f"Total encaissé (remboursements valides) : {aff or '0'}")
 
     def ajouter(self):
         DlgRemboursement(self, self.db, self.auth, self.avec_id, callback=self.actualiser)
+
+    def annuler(self):
+        s = self.tv.focus()
+        if not s:
+            messagebox.showwarning("Sélection", "Sélectionnez une opération."); return
+        rem = self.db.un("SELECT r.*, r.credit_id AS cid FROM remboursement r WHERE id=?",
+                         (int(s),))
+        if not rem:
+            return
+        if rem["annule"]:
+            messagebox.showwarning("Annulation", "Cette opération est déjà annulée.")
+            return
+        if not messagebox.askyesno(
+                "Confirmer annulation",
+                "Annuler ce remboursement ? Le crédit sera recalculé.\n"
+                "Cette action reste traçable.", parent=self):
+            return
+        try:
+            self.auth.exiger("repayments.cancel", contexte="annulation remboursement")
+            self.db.exec("BEGIN")
+            cid = rem["cid"]
+            self.db.exec("UPDATE remboursement SET annule=1 WHERE id=?", (int(s),))
+            self.db.exec("""
+                UPDATE credit SET rembourse=COALESCE(
+                  (SELECT SUM(montant_total) FROM remboursement
+                   WHERE credit_id=? AND annule=0), 0)
+                WHERE id=?
+            """, (cid, cid))
+            self.db.commit()
+            self.db.audit(self.auth.uid, self.auth.ulogin, "ANNULER_REMBOURSEMENT",
+                          "remboursement", int(s), {"credit_id": cid})
+            Finance.maj_statuts(self.db)
+            self.actualiser()
+        except (PermissionError, sqlite3.Error) as e:
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+            messagebox.showerror("Erreur", str(e))
 
 
 class DlgRemboursement(tk.Toplevel):
@@ -1873,7 +3374,7 @@ class DlgRemboursement(tk.Toplevel):
                   font=(FONT, 9, "italic"), background=C["gris"]).grid(
             row=3, column=0, columnspan=2, pady=2)
 
-        self.v_mt, _  = champ(frm, "Montant payé (FC) *", 4)
+        self.v_mt, _  = champ(frm, "Montant payé *", 4)
         self.v_dt, _  = champ(frm, "Date paiement (AAAA-MM-JJ) *", 5, date.today().isoformat())
         self.v_dc, _  = champ(frm, "Description", 6)
 
@@ -1895,13 +3396,14 @@ class DlgRemboursement(tk.Toplevel):
         mid = self.mmap[nom]
         creds = self.db.tous("""
             SELECT id, principal, montant_interet, montant_total, rembourse,
-                   date_octroi, date_echeance, statut
+                   date_octroi, date_echeance, statut, devise, taux_penalite
             FROM credit WHERE membre_id=? AND statut IN ('actif','en_retard')
         """, (mid,))
         self.crmap = {}
         for c in creds:
             solde = c["montant_total"] - c["rembourse"]
-            lbl = f"Crédit #{c['id']} — Solde: {solde:,.0f} FC — Éch: {c['date_echeance']}"
+            dev   = c["devise"] or DEVISE_DEFAUT
+            lbl = f"Crédit #{c['id']} — Solde: {solde:,.0f} {dev} — Éch: {c['date_echeance']}"
             self.crmap[lbl] = c
         self.cb_cr["values"] = list(self.crmap.keys())
         if self.crmap:
@@ -1917,31 +3419,39 @@ class DlgRemboursement(tk.Toplevel):
         self._cr = c
         solde = c["montant_total"] - c["rembourse"]
         jr    = Finance.jours_retard(c["date_echeance"])
+        dev   = c["devise"] or DEVISE_DEFAUT
         self.v_det.set(
-            f"Total dû: {c['montant_total']:,.0f} | Remboursé: {c['rembourse']:,.0f} | Solde: {solde:,.0f} FC")
+            f"Total dû: {c['montant_total']:,.0f} {dev} | Remboursé: {c['rembourse']:,.0f} "
+            f"{dev} | Solde: {solde:,.0f} {dev}")
         if jr > 0:
-            pen = Finance.penalite(solde, TAUX_PENALITE_DEFAUT, jr)
-            self.v_pen.set(f"Retard : {jr} jours — Pénalité estimée : {pen:,.0f} FC")
+            taux_pen = c.get("taux_penalite") or TAUX_PENALITE_DEFAUT
+            pen = Finance.penalite(solde, taux_pen, jr)
+            self.v_pen.set(f"Retard : {jr} jours — Pénalité estimée : {pen:,.0f} {dev} "
+                           f"({taux_pen*100:.2f} %/mois)")
         else:
             self.v_pen.set("")
 
     def _sauver(self):
         try:
+            self.auth.exiger("repayments.create", contexte="remboursement")
             if not self._cr:
                 raise ValueError("Sélectionnez un crédit.")
             c    = self._cr
             mt   = Finance.valider_montant(self.v_mt.get())
             dt   = Finance.valider_date(self.v_dt.get())
             solde = c["montant_total"] - c["rembourse"]
+            dev   = c["devise"] or DEVISE_DEFAUT
+            taux_pen = c.get("taux_penalite") or TAUX_PENALITE_DEFAUT
 
             if mt > solde * 2:
                 if not messagebox.askyesno("Attention",
-                    f"Le montant payé ({mt:,.0f} FC) dépasse largement le solde ({solde:,.0f} FC).\nContinuer ?",
+                    f"Le montant payé ({mt:,.0f} {dev}) dépasse largement le solde "
+                    f"({solde:,.0f} {dev}).\nContinuer ?",
                     parent=self):
                     return
 
             jr  = Finance.jours_retard(c["date_echeance"])
-            pen = Finance.penalite(solde, TAUX_PENALITE_DEFAUT, jr) if jr > 0 else 0
+            pen = Finance.penalite(solde, taux_pen, jr) if jr > 0 else 0
 
             # Imputation : pénalité → intérêt → principal (basé sur montants restants)
             pen_pay  = min(pen, mt)
@@ -1964,10 +3474,11 @@ class DlgRemboursement(tk.Toplevel):
                 cur = self.db.exec("""
                     INSERT INTO remboursement
                     (credit_id,membre_id,mont_principal,mont_interet,mont_penalite,
-                     montant_total,date_paiement,description,cree_par)
-                    VALUES(?,?,?,?,?,?,?,?,?)
+                     montant_total,date_paiement,description,cree_par,devise)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
                 """, (c["id"], mid, prin_pay, int_pay, pen_pay,
-                      mt, dt.isoformat(), self.v_dc.get().strip() or None, self.auth.uid))
+                      mt, dt.isoformat(), self.v_dc.get().strip() or None,
+                      self.auth.uid, dev))
 
                 nouveau_remb  = c["rembourse"] + mt
                 nouveau_remb  = min(nouveau_remb, c["montant_total"])
@@ -1981,16 +3492,247 @@ class DlgRemboursement(tk.Toplevel):
                 raise
             self.db.audit(self.auth.uid, self.auth.ulogin, "REMBOURSEMENT",
                           "remboursement", cur.lastrowid,
-                          {"credit_id": c["id"], "montant": mt})
-            messagebox.showinfo("Remboursement enregistré",
-                f"Principal  : {prin_pay:,.0f} FC\n"
-                f"Intérêt    : {int_pay:,.0f} FC\n"
-                f"Pénalité   : {pen_pay:,.0f} FC\n"
-                f"Statut crédit : {nouveau_statut.upper()}", parent=self)
+                          {"credit_id": c["id"], "montant": mt, "devise": dev})
+            membre = self.db.un("SELECT * FROM membre WHERE id=?", (mid,))
+            avec   = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,))
+            gerer_recu_operation(
+                self, self.auth, self.db, avec, membre,
+                "REMBOURSEMENT", "Remboursement de crédit", cur.lastrowid, mt,
+                {"credit_id": c["id"], "montant_impute": mt,
+                 "penalite": pen_pay, "interet": int_pay, "principal": prin_pay,
+                 "solde": nouveau_remb, "date_paiement": dt.isoformat(),
+                 "devise": dev},
+                devise=dev)
             if self.cb: self.cb()
             self.destroy()
-        except (ValueError, sqlite3.Error) as e:
+        except (PermissionError, ValueError, sqlite3.Error) as e:
             messagebox.showerror("Erreur", str(e), parent=self)
+
+
+# ════════════════════════════════════════════════════════════════
+#  COMPTES MEMBRES
+# ════════════════════════════════════════════════════════════════
+
+class OngletComptes(ttk.Frame):
+    """Comptes membres (épargne, courant, bloqué, crédit) par devise :
+    soldes, statuts (actif / bloqué / suspendu), historique des événements."""
+
+    def __init__(self, parent, db, auth, avec_id=1):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.avec_id = avec_id
+        self.columnconfigure(0, weight=1); self.rowconfigure(2, weight=1)
+        self._ui(); self.actualiser()
+
+    def _ui(self):
+        bar = ttk.Frame(self)
+        bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ttk.Label(bar, text="Comptes membres", style="Titre.TLabel").pack(side="left")
+        self._btns = {}
+        for txt, cmd, st, perm in [
+            ("Bloquer",     self._bloquer,       "Rouge.TButton",  "accounts.block"),
+            ("Débloquer",   self._debloquer,     "Vert.TButton",   "accounts.block"),
+            ("Suspendre",   self._suspendre,     "Rouge.TButton",  "accounts.block"),
+            ("Réactiver",   self._reactiver,     "Vert.TButton",   "accounts.block"),
+            ("Détail",      self.detail,         "Bleu.TButton",   "accounts.view"),
+            ("Actualiser",  self.actualiser,     "TButton",        "accounts.view"),
+        ]:
+            if not self.auth.permis(perm):
+                continue
+            self._btns[txt] = btn(bar, txt, cmd, st)
+            self._btns[txt].pack(side="right", padx=3)
+
+        rech = ttk.Frame(self)
+        rech.grid(row=1, column=0, sticky="ew", padx=12, pady=2)
+        ttk.Label(rech, text="Rechercher :").pack(side="left")
+        self.v_rech = tk.StringVar()
+        self.v_rech.trace("w", lambda *a: self.actualiser())
+        ttk.Entry(rech, textvariable=self.v_rech, width=30).pack(side="left", padx=8)
+        ttk.Label(rech, text="Devise :").pack(side="left", padx=(12, 0))
+        self.v_dev = tk.StringVar(value="TOUTES")
+        self.cb_dev = ttk.Combobox(rech, textvariable=self.v_dev,
+                                   state="readonly", width=8)
+        self.cb_dev["values"] = ["TOUTES"] + list(DEVISES)
+        self.cb_dev.pack(side="left", padx=6)
+        self.cb_dev.bind("<<ComboboxSelected>>", lambda e: self.actualiser())
+
+        cols = ("Compte#","Membre","Type de compte","Devise","Solde",
+                "Statut","Description","Créé le")
+        lrg  = [60, 180, 130, 60, 120, 90, 220, 140]
+        self.tv, f = treeview(self, cols, lrg)
+        f.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+        self.tv.bind("<Double-1>", lambda e: self.detail())
+
+        self.v_res = tk.StringVar()
+        ttk.Label(self, textvariable=self.v_res,
+                  font=(FONT, 10, "bold")).grid(row=3, column=0, pady=6)
+        self.tv.bind("<<TreeviewSelect>>", self._actualiser_boutons)
+
+    def _acompte(self):
+        s = self.tv.focus()
+        if not s:
+            return None
+        return self.db.un("SELECT * FROM compte WHERE id=?", (int(s),))
+
+    def _sel(self):
+        c = self._acompte()
+        if not c:
+            messagebox.showwarning("Sélection",
+                                   "Sélectionnez un compte membre.")
+        return c
+
+    def actualiser(self):
+        for it in self.tv.get_children():
+            self.tv.delete(it)
+        terme = (self.v_rech.get() if hasattr(self, "v_rech") else "").strip().lower()
+        devf  = (self.v_dev.get() if hasattr(self, "v_dev") else "").strip()
+        rows = self.db.tous("""
+            SELECT c.*, m.nom, m.prenom FROM compte c JOIN membre m ON c.membre_id=m.id
+            WHERE m.avec_id=? ORDER BY m.nom, c.type_compte, c.devise
+        """, (self.avec_id,))
+        self.acomptes = {}
+        nb = 0
+        for i, c in enumerate(rows):
+            nc = f"{c['nom']} {c['prenom'] or ''}".strip()
+            if terme and terme not in nc.lower():
+                continue
+            if devf and devf != "TOUTES" and (c["devise"] or DEVISE_DEFAUT) != devf:
+                continue
+            solde = Finance.solde_compte(self.db, c["membre_id"], c["type_compte"],
+                                         c["devise"] or DEVISE_DEFAUT)
+            tag = ("rouge" if c["statut"] == "bloque" else
+                   "gris" if c["statut"] == "suspendu" else
+                   "vert" if solde > 0 else
+                   "p" if i % 2 == 0 else "i")
+            self.tv.insert("", "end", iid=str(c["id"]), tags=(tag,), values=(
+                c["id"], nc, _libelle_compte(c["type_compte"]),
+                c["devise"] or DEVISE_DEFAUT,
+                f"{solde:,.0f}" if solde else "0",
+                _libelle_statut_compte(c["statut"]),
+                c["description"] or "", c["cree_le"]))
+            self.acomptes[c["id"]] = c
+            nb += 1
+        self.v_res.set(f"{nb} compte(s) affiché(s)")
+        self._actualiser_boutons()
+
+    def _actualiser_boutons(self, ev=None):
+        """Active/désactive les boutons selon le statut du compte sélectionné.
+        Les comptes épargne/crédit dérivés ne sont pas gérables ici : leurs
+        mouvements passent par les onglets Épargnes/Crédits."""
+        for nom, cible in (("Bloquer", "bloque"), ("Débloquer", "actif"),
+                           ("Suspendre", "suspendu"), ("Réactiver", "actif")):
+            b = self._btns.get(nom)
+            if not b:
+                continue
+            c = self.tv.focus()
+            bloquable = (self.acomptes.get(int(c)) if c else None)
+            elig = False
+            if isinstance(bloquable, dict):
+                st = bloquable.get("statut")
+                if nom in ("Bloquer", "Débloquer"):
+                    elig = st == "actif" and nom == "Bloquer" or \
+                           st == "bloque" and nom == "Débloquer"
+                else:
+                    elig = (st in ("actif", "bloque") and nom == "Suspendre") or \
+                           (st == "suspendu" and nom == "Réactiver")
+            b.config(state=("normal" if elig else "disabled"))
+
+    def _action_statut(self, cible, evenement, lib_action):
+        c = self._sel()
+        if not c:
+            return
+        if c["statut"] == cible:
+            messagebox.showwarning("Compte",
+                f"Ce compte est déjà {_libelle_statut_compte(cible).lower()}.")
+            return
+        try:
+            self.auth.exiger("accounts.block",
+                             contexte=f"{lib_action} du compte #{c['id']}")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        if not messagebox.askyesno(
+                "Confirmer",
+                f"{lib_action} le compte {_libelle_compte(c['type_compte'])} "
+                f"({c['devise']}) de « {c['nom']} {c['prenom'] or ''} » ?\n\n"
+                f"Statut actuel : {_libelle_statut_compte(c['statut'])} "
+                f"→ {_libelle_statut_compte(cible)}.", parent=self):
+            return
+        try:
+            self.db.exec("UPDATE compte SET statut=? WHERE id=?", (cible, c["id"]))
+            self.db.exec("INSERT INTO compte_evenement(compte_id,type_evenement,note,cree_par)"
+                         " VALUES(?,?,?,?)",
+                         (c["id"], evenement, f"Action {lib_action}", self.auth.uid))
+            self.db.commit()
+            self.db.audit(self.auth.uid, self.auth.ulogin, "MODIFIER_COMPTE",
+                          "compte", c["id"],
+                          {"membre_id": c["membre_id"],
+                           "type_compte": c["type_compte"], "devise": c["devise"],
+                           "avait": c["statut"], "a": cible})
+            self.actualiser()
+        except sqlite3.Error as e:
+            messagebox.showerror("Erreur", str(e))
+
+    def _bloquer(self):   self._action_statut("bloque",   "BLOCAGE",   "Bloquer")
+    def _debloquer(self): self._action_statut("actif",    "DEBLOCAGE", "Débloquer")
+    def _suspendre(self): self._action_statut("suspendu", "SUSPENSION","Suspendre")
+    def _reactiver(self): self._action_statut("actif",    "REACTIVATION","Réactiver")
+
+    def detail(self):
+        c = self._sel()
+        if not c:
+            return
+        m = self.db.un("SELECT * FROM membre WHERE id=?", (c["membre_id"],))
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Compte #{c['id']} — {m['nom']} {m.get('prenom') or ''}")
+        dlg.geometry("600x420")
+        dlg.grab_set()
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+        finfos = ttk.Frame(nb, padding=14)
+        nb.add(finfos, text="  Informations  ")
+        solde = Finance.solde_compte(self.db, c["membre_id"], c["type_compte"],
+                                     c["devise"] or DEVISE_DEFAUT)
+        lignes = [
+            ("Membre",        f"{m['nom']} {m.get('prenom') or ''}".strip()),
+            ("Type de compte", _libelle_compte(c["type_compte"])),
+            ("Devise",         c["devise"] or DEVISE_DEFAUT),
+            ("Solde",          f"{solde:,.0f} {c['devise'] or DEVISE_DEFAUT}"),
+            ("Statut",         _libelle_statut_compte(c["statut"])),
+            ("Description",    c["description"] or "—"),
+            ("Créé le",        c["cree_le"]),
+        ]
+        for r, (lbl, val) in enumerate(lignes):
+            ttk.Label(finfos, text=f"{lbl} :", font=(FONT, 10, "bold")).grid(
+                row=r, column=0, sticky="e", padx=(0, 12), pady=3)
+            ttk.Label(finfos, text=val).grid(row=r, column=1, sticky="w", pady=3)
+
+        fev = ttk.Frame(nb)
+        nb.add(fev, text="  Événements  ")
+        tv_e, f_e = treeview(fev, ("Date", "Événement", "Note", "Par"), [140, 110, 260, 90])
+        f_e.pack(fill="both", expand=True, padx=4, pady=4)
+        evts = self.db.tous("""
+            SELECT ce.cree_le, ce.type_evenement, ce.note, u.nom
+            FROM compte_evenement ce LEFT JOIN utilisateur u ON ce.cree_par=u.id
+            WHERE ce.compte_id=? ORDER BY ce.id DESC""", (c["id"],))
+        for i, ev in enumerate(evts):
+            tv_e.insert("", "end", tags=("p" if i % 2 == 0 else "i",), values=(
+                ev["cree_le"], ev["type_evenement"], ev["note"] or "",
+                ev["nom"] or "—"))
+
+        fm = ttk.Frame(nb)
+        nb.add(fm, text="  Mouvements (courant / bloqué)  ")
+        tv_m, f_m = treeview(fm, ("Date", "Type", "Montant", "Note"), [140, 90, 110, 260])
+        f_m.pack(fill="both", expand=True, padx=4, pady=4)
+        if c["type_compte"] in ("courant", "bloque"):
+            mvts = self.db.tous("""
+                SELECT cm.cree_le, cm.type_mouvement, cm.montant, cm.note
+                FROM compte_mouvement cm WHERE cm.compte_id=? ORDER BY cm.id DESC
+            """, (c["id"],))
+            for i, mv in enumerate(mvts):
+                tv_m.insert("", "end", tags=("p" if i % 2 == 0 else "i",), values=(
+                    mv["cree_le"], mv["type_mouvement"],
+                    f"{mv['montant']:,.0f} {c['devise']}", mv["note"] or ""))
+        btn(dlg, "Fermer", dlg.destroy).pack(pady=10)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -2008,12 +3750,12 @@ class OngletSessions(ttk.Frame):
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         ttk.Label(bar, text="Sessions / Réunions AVEC", style="Titre.TLabel").pack(side="left")
-        for txt, cmd, st in [
-            ("+ Nouvelle session", self.ajouter,   "Vert.TButton"),
-            ("Clôturer session",   self.cloturer,  "Rouge.TButton"),
-            ("Actualiser",         self.actualiser, "TButton"),
+        for txt, cmd, st, perm in [
+            ("+ Nouvelle session", self.ajouter,   "Vert.TButton",   "sessions.create"),
+            ("Clôturer session",   self.cloturer,  "Rouge.TButton",  "sessions.close"),
+            ("Actualiser",         self.actualiser, "TButton",       "sessions.view"),
         ]:
-            if self.auth.user["role"] == "lecteur" and txt != "Actualiser":
+            if not self.auth.permis(perm):
                 continue
             btn(bar, txt, cmd, st).pack(side="right", padx=3)
 
@@ -2038,6 +3780,11 @@ class OngletSessions(ttk.Frame):
                 r["statut"].upper(), r["notes"] or "", r["agent"] or "—", r["cree_le"]))
 
     def ajouter(self):
+        try:
+            self.auth.exiger("sessions.create", contexte="création session")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e))
+            return
         date_r = simpledialog.askstring("Nouvelle session",
             "Date de la réunion (AAAA-MM-JJ) :", parent=self,
             initialvalue=date.today().isoformat())
@@ -2060,6 +3807,11 @@ class OngletSessions(ttk.Frame):
             messagebox.showerror("Erreur", str(e))
 
     def cloturer(self):
+        try:
+            self.auth.exiger("sessions.close", contexte="clôture session")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e))
+            return
         s = self.tv.focus()
         if not s:
             messagebox.showwarning("Sélection", "Sélectionnez une session."); return
@@ -2097,17 +3849,17 @@ class OngletRapports(ttk.Frame):
             grille.columnconfigure(c, weight=1)
 
         actions = [
-            ("Bilan financier",           self._bilan,        "Bleu.TButton"),
-            ("Membres → CSV",             self._exp_membres,  "Bleu.TButton"),
-            ("Épargnes → CSV",            self._exp_ep,       "Bleu.TButton"),
-            ("Crédits → CSV",             self._exp_cr,       "Bleu.TButton"),
-            ("Crédits en retard → CSV",   self._exp_retards,  "Rouge.TButton"),
-            ("Journal d'audit → CSV",     self._exp_audit,    "TButton"),
-            ("Rapport complet → HTML",    self._rapport_html, "Vert.TButton"),
-            ("Sauvegarde base de données",self._sauver,       "Vert.TButton"),
+            ("Bilan financier",           self._bilan,       "Bleu.TButton",  "reports.view"),
+            ("Membres → CSV",             self._exp_membres, "Bleu.TButton",  "reports.export"),
+            ("Épargnes → CSV",            self._exp_ep,      "Bleu.TButton",  "reports.export"),
+            ("Crédits → CSV",             self._exp_cr,      "Bleu.TButton",  "reports.export"),
+            ("Crédits en retard → CSV",   self._exp_retards, "Rouge.TButton", "reports.export"),
+            ("Journal d'audit → CSV",     self._exp_audit,   "TButton",       "audit.view"),
+            ("Rapport complet → HTML",    self._rapport_html, "Vert.TButton", "reports.generate"),
+            ("Sauvegarde base de données",self._sauver,      "Vert.TButton",  "backup.create"),
         ]
-        for i, (lbl, cmd, st) in enumerate(actions):
-            if lbl == "Sauvegarde base de données" and self.auth.user["role"] == "lecteur":
+        for i, (lbl, cmd, st, perm) in enumerate(actions):
+            if not self.auth.permis(perm):
                 continue
             r, c = divmod(i, 3)
             btn(grille, lbl, cmd, st, l=22).grid(row=r, column=c, padx=8, pady=8, sticky="ew")
@@ -2120,15 +3872,36 @@ class OngletRapports(ttk.Frame):
         self._bilan()
 
     # ── Stats ─────────────────────────────────────────────────────
+    def _somme_par_devise(self, sql, *args):
+        """{devise: total} — agrégat SQL GROUP BY devise sur une ligne."""
+        return {r["devise"] or DEVISE_DEFAUT: r["t"]
+                for r in self.db.tous(sql, *args)}
+
     def _get_stats(self):
         db, aid = self.db, self.avec_id
         Finance.maj_statuts(db)
         membres   = db.valeur("SELECT COUNT(*) FROM membre WHERE statut='actif' AND avec_id=?", (aid,)) or 0
-        ep        = db.valeur("SELECT COALESCE(SUM(e.montant),0) FROM epargne e JOIN membre m ON e.membre_id=m.id WHERE m.avec_id=? AND e.annule=0", (aid,)) or 0
-        cr_p      = db.valeur("SELECT COALESCE(SUM(principal),0) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=?", (aid,)) or 0
-        cr_i      = db.valeur("SELECT COALESCE(SUM(montant_interet),0) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=?", (aid,)) or 0
-        pf_actif  = db.valeur("SELECT COALESCE(SUM(montant_total-rembourse),0) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut IN ('actif','en_retard')", (aid,)) or 0
-        rembs     = db.valeur("SELECT COALESCE(SUM(r.montant_total),0) FROM remboursement r JOIN membre m ON r.membre_id=m.id WHERE m.avec_id=? AND r.annule=0", (aid,)) or 0
+        ep        = self._somme_par_devise(
+            "SELECT e.devise AS devise, SUM(e.montant) AS t FROM epargne e"
+            " JOIN membre m ON e.membre_id=m.id"
+            " WHERE m.avec_id=? AND e.annule=0 GROUP BY e.devise", (aid,))
+        cr_p      = self._somme_par_devise(
+            "SELECT c.devise AS devise, SUM(c.principal) AS t FROM credit c"
+            " JOIN membre m ON c.membre_id=m.id"
+            " WHERE m.avec_id=? GROUP BY c.devise", (aid,))
+        cr_i      = self._somme_par_devise(
+            "SELECT c.devise AS devise, SUM(c.montant_interet) AS t FROM credit c"
+            " JOIN membre m ON c.membre_id=m.id"
+            " WHERE m.avec_id=? GROUP BY c.devise", (aid,))
+        pf_actif  = self._somme_par_devise(
+            "SELECT c.devise AS devise, SUM(c.montant_total-c.rembourse) AS t FROM credit c"
+            " JOIN membre m ON c.membre_id=m.id"
+            " WHERE m.avec_id=? AND c.statut IN ('actif','en_retard') GROUP BY c.devise",
+            (aid,))
+        rembs     = self._somme_par_devise(
+            "SELECT r.devise AS devise, SUM(r.montant_total) AS t FROM remboursement r"
+            " JOIN membre m ON r.membre_id=m.id"
+            " WHERE m.avec_id=? AND r.annule=0 GROUP BY r.devise", (aid,))
         retards   = db.valeur("SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut='en_retard'", (aid,)) or 0
         cr_actifs = db.valeur("SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut='actif'", (aid,)) or 0
         cr_soldes = db.valeur("SELECT COUNT(*) FROM credit c JOIN membre m ON c.membre_id=m.id WHERE m.avec_id=? AND c.statut='solde'", (aid,)) or 0
@@ -2138,37 +3911,50 @@ class OngletRapports(ttk.Frame):
                     cr_actifs=cr_actifs, cr_soldes=cr_soldes,
                     sessions=sessions)
 
+    @staticmethod
+    def _fmt_d(pat, d, prefixe="", suffixe=""):
+        """Patte de mise en forme par devise d'un dict {devise: montant}."""
+        if not d:
+            return f"{pat.format(valeur=0, devise=DEVISE_DEFAUT)}"
+        return "\n".join(
+            f"{prefixe}{pat.format(valeur=v, devise=k)}{suffixe}"
+            for k, v in sorted(d.items()))
+
     def _bilan(self):
         s = self._get_stats()
-        solde = s["ep"] - s["pf_actif"]
+        epam = sum(s["ep"].values()); pfam = sum(s["pf_actif"].values())
+        solde = epam - pfam
+        def la(d, v):
+            return "  ·  ".join(f"{vv:>12,.0f} {kk}" for kk, vv in sorted(d.items())) \
+                if d else f"{v:>12,.0f} {DEVISE_DEFAUT}"
         texte = f"""
-{"═"*57}
+{"═"*66}
       BILAN FINANCIER — {APP_NOM} v{APP_VERSION}
       Généré le : {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}
-{"═"*57}
+{"═"*66}
 
  MEMBRES
-   Membres actifs                   : {s['membres']:>10}
+   Membres actifs                : {s['membres']:>10}
 
  ÉPARGNES
-   Total collecté (FC)              : {s['ep']:>14,.0f}
+   Total collecté                : {la(s['ep'], 0)}
 
  CRÉDITS
-   Total principal octroyé (FC)     : {s['cr_p']:>14,.0f}
-   Total intérêts prévus (FC)       : {s['cr_i']:>14,.0f}
-   Portefeuille actif (solde FC)    : {s['pf_actif']:>14,.0f}
-   Nombre crédits en retard         : {s['retards']:>10}
+   Total principal octroyé       : {la(s['cr_p'], 0)}
+   Total intérêts prévus         : {la(s['cr_i'], 0)}
+   Portefeuille actif (solde)    : {la(s['pf_actif'], 0)}
+   Nombre crédits en retard      : {s['retards']:>10}
 
  REMBOURSEMENTS
-   Total encaissé (FC)              : {s['rembs']:>14,.0f}
+   Total encaissé                : {la(s['rembs'], 0)}
 
  SESSIONS
-   Total sessions tenues            : {s['sessions']:>10}
+   Total sessions tenues         : {s['sessions']:>10}
 
  SOLDE NET ESTIMÉ
-   Épargnes — Portefeuille actif FC : {solde:>14,.0f}
+   Épargnes — Portefeuille actif : {solde:>14,.0f} (toutes devises confondues)
 
-{"═"*57}
+{"═"*66}
 """
         self.txt.config(state="normal")
         self.txt.delete("1.0", "end")
@@ -2194,66 +3980,83 @@ class OngletRapports(ttk.Frame):
             messagebox.showerror("Erreur", str(e))
 
     def _exp_membres(self):
+        self.auth.exiger("reports.export", contexte="export membres CSV")
         rows = self.db.tous("""
             SELECT m.id, m.numero, m.nom, m.prenom, m.telephone, m.adresse,
-                   m.nb_parts, m.statut, m.date_adhesion,
-                   COALESCE(SUM(CASE WHEN e.annule=0 THEN e.montant END),0) as ep
-            FROM membre m LEFT JOIN epargne e ON e.membre_id=m.id
-            WHERE m.avec_id=? GROUP BY m.id ORDER BY m.nom
+                   m.nb_parts, m.statut, m.date_adhesion
+            FROM membre m WHERE m.avec_id=? ORDER BY m.nom
         """, (self.avec_id,))
+        ep, cr = _soldes_membres(self.db, self.avec_id)
+        lignes = []
+        for r in rows:
+            mes_ep = {d: v for (mid, d), v in ep.items() if mid == r["id"]}
+            mes_cr = {d: v for (mid, d), v in cr.items() if mid == r["id"]}
+            lab_ep = " | ".join(f"{v:,.0f} {d}" for d, v in sorted(mes_ep.items()))
+            lab_cr = " | ".join(f"{v:,.0f} {d}" for d, v in sorted(mes_cr.items()))
+            lignes.append([r["id"], r["numero"], r["nom"], r["prenom"], r["telephone"],
+                           r["adresse"], r["nb_parts"], r["statut"], r["date_adhesion"],
+                           lab_ep or "0", lab_cr or "0"])
         self._csv("membres.csv",
                   ["ID","N° Membre","Nom","Prénom","Téléphone","Adresse",
-                   "Nb Parts","Statut","Adhésion","Épargne FC"],
-                  [[r["id"],r["numero"],r["nom"],r["prenom"],r["telephone"],
-                    r["adresse"],r["nb_parts"],r["statut"],r["date_adhesion"],
-                    r["ep"]] for r in rows])
+                   "Nb Parts","Statut","Adhésion","Épargnes (par devise)",
+                   "Crédit actif (par devise)"],
+                  lignes)
 
     def _exp_ep(self):
+        self.auth.exiger("reports.export", contexte="export épargnes CSV")
         rows = self.db.tous("""
             SELECT e.id, e.date_op, m.nom, m.prenom, e.type, e.montant,
-                   e.description, e.annule
+                   e.devise, e.description, e.annule
             FROM epargne e JOIN membre m ON e.membre_id=m.id
             WHERE m.avec_id=? ORDER BY e.date_op DESC
         """, (self.avec_id,))
         self._csv("epargnes.csv",
-                  ["ID","Date","Nom","Prénom","Type","Montant FC","Description","Annulé"],
+                  ["ID","Date","Nom","Prénom","Type","Montant","Devise",
+                   "Description","Annulé"],
                   [[r["id"],r["date_op"],r["nom"],r["prenom"],r["type"],
-                    r["montant"],r["description"],"Oui" if r["annule"] else "Non"]
+                    r["montant"],r["devise"] or DEVISE_DEFAUT, r["description"],
+                    "Oui" if r["annule"] else "Non"]
                    for r in rows])
 
     def _exp_cr(self):
+        self.auth.exiger("reports.export", contexte="export crédits CSV")
         rows = self.db.tous("""
             SELECT c.id, c.date_octroi, m.nom, m.prenom, c.principal,
                    c.taux, c.duree_mois, c.montant_interet, c.montant_total,
-                   c.rembourse, c.date_echeance, c.statut
+                   c.rembourse, c.date_echeance, c.statut, c.devise, c.type_credit
             FROM credit c JOIN membre m ON c.membre_id=m.id
             WHERE m.avec_id=? ORDER BY c.date_octroi DESC
         """, (self.avec_id,))
         self._csv("credits.csv",
-                  ["ID","Date octroi","Nom","Prénom","Principal FC","Taux","Durée",
-                   "Intérêt FC","Total FC","Remboursé FC","Solde FC","Échéance","Statut"],
-                  [[r["id"],r["date_octroi"],r["nom"],r["prenom"],r["principal"],
+                  ["ID","Date octroi","Nom","Prénom","Type","Principal","Taux","Durée",
+                   "Intérêt","Total","Remboursé","Solde","Devise","Échéance","Statut"],
+                  [[r["id"],r["date_octroi"],r["nom"],r["prenom"],
+                    _le_libelle_type_credit(r["type_credit"]),r["principal"],
                     f"{r['taux']*100:.1f}%",f"{r['duree_mois']} mois",
                     r["montant_interet"],r["montant_total"],r["rembourse"],
-                    r["montant_total"]-r["rembourse"],r["date_echeance"],r["statut"]]
+                    r["montant_total"]-r["rembourse"],r["devise"] or DEVISE_DEFAUT,
+                    r["date_echeance"],r["statut"]]
                    for r in rows])
 
     def _exp_retards(self):
+        self.auth.exiger("reports.export", contexte="export retards CSV")
         rows = self.db.tous("""
             SELECT c.id, m.nom, m.prenom, m.telephone, c.montant_total,
-                   c.rembourse, c.date_echeance
+                   c.rembourse, c.date_echeance, c.devise
             FROM credit c JOIN membre m ON c.membre_id=m.id
             WHERE m.avec_id=? AND c.statut='en_retard' ORDER BY c.date_echeance
         """, (self.avec_id,))
         self._csv("credits_en_retard.csv",
-                  ["Crédit#","Nom","Prénom","Téléphone","Total FC","Remboursé FC",
-                   "Solde FC","Échéance","Jours retard"],
+                  ["Crédit#","Nom","Prénom","Téléphone","Total","Remboursé",
+                   "Solde","Devise","Échéance","Jours retard"],
                   [[r["id"],r["nom"],r["prenom"],r["telephone"],r["montant_total"],
                     r["rembourse"],r["montant_total"]-r["rembourse"],
+                    r["devise"] or DEVISE_DEFAUT,
                     r["date_echeance"],Finance.jours_retard(r["date_echeance"])]
                    for r in rows])
 
     def _exp_audit(self):
+        self.auth.exiger("audit.view", contexte="export journal CSV")
         rows = self.db.tous(
             "SELECT ts,login,action,tbl,rid,details FROM audit_log ORDER BY id DESC")
         self._csv("audit.csv",
@@ -2262,17 +4065,19 @@ class OngletRapports(ttk.Frame):
                    for r in rows])
 
     def _rapport_html(self):
+        self.auth.exiger("reports.generate", contexte="rapport HTML")
         s   = self._get_stats()
-        solde = s["ep"] - s["pf_actif"]
+        solde = sum(s["ep"].values()) - sum(s["pf_actif"].values())
+        devises = sorted(set(list(s["ep"]) + list(s["pf_actif"]) + list(s["rembs"]))
+                         or [DEVISE_DEFAUT])
         membres = self.db.tous("""
-            SELECT m.nom, m.prenom, m.telephone, m.statut,
-                   COALESCE(SUM(CASE WHEN e.annule=0 THEN e.montant END),0) as ep
-            FROM membre m LEFT JOIN epargne e ON e.membre_id=m.id
-            WHERE m.avec_id=? GROUP BY m.id ORDER BY m.nom
+            SELECT m.id, m.nom, m.prenom, m.telephone, m.statut
+            FROM membre m WHERE m.avec_id=? ORDER BY m.nom
         """, (self.avec_id,))
+        ep_m, cr_m = _soldes_membres(self.db, self.avec_id)
         retards = self.db.tous("""
             SELECT m.nom, m.prenom, m.telephone, c.montant_total,
-                   c.rembourse, c.date_echeance
+                   c.rembourse, c.date_echeance, c.devise
             FROM credit c JOIN membre m ON c.membre_id=m.id
             WHERE m.avec_id=? AND c.statut='en_retard' ORDER BY c.date_echeance
         """, (self.avec_id,))
@@ -2281,9 +4086,11 @@ class OngletRapports(ttk.Frame):
             nom = html.escape(f"{m['nom']} {m['prenom'] or ''}".strip())
             tel = html.escape(m['telephone'] or '')
             statut = html.escape(m['statut'])
+            mes_ep = {d: v for (mid, d), v in ep_m.items() if mid == m["id"]}
+            lab = " / ".join(f"{v:,.0f} {d}" for d, v in sorted(mes_ep.items())) or "0"
             return (f"<tr><td>{nom}</td>"
                     f"<td>{tel}</td><td>{statut}</td>"
-                    f"<td>{m['ep']:,.0f}</td></tr>")
+                    f"<td>{lab}</td></tr>")
         def tr_r(r):
             solde_cr = r["montant_total"] - r["rembourse"]
             jr = Finance.jours_retard(r["date_echeance"])
@@ -2292,15 +4099,36 @@ class OngletRapports(ttk.Frame):
             ech = html.escape(str(r['date_echeance']))
             return (f"<tr class='alerte'><td>{nom}</td>"
                     f"<td>{tel}</td>"
-                    f"<td>{solde_cr:,.0f}</td><td>{ech}</td>"
+                    f"<td>{solde_cr:,.0f} {r['devise'] or DEVISE_DEFAUT}</td>"
+                    f"<td>{ech}</td>"
                     f"<td>{jr}j</td></tr>")
 
-        svg_bar = ChartEngine.svg_bar([
-            ("Épargnes", s["ep"], "#1E8449"),
-            ("Crédit actif", s["pf_actif"], "#7D6608"),
-            ("Remboursé", s["rembs"], "#6C3483"),
-            ("Solde net", max(solde, 0), "#2980B9"),
-        ])
+        def carte(valeur, lib, fond="#1A5276"):
+            return (f"<div class='k' style='background:{fond}'>"
+                    f"<div class='v'>{valeur}</div><div class='l'>{lib}</div></div>")
+
+        cartes = [carte(s['membres'], "Membres actifs")]
+        for d in devises:
+            cartes.append(carte(f"{s['ep'].get(d,0):,.0f}", f"Épargnes {d}"))
+        for d in devises:
+            cartes.append(carte(f"{s['pf_actif'].get(d,0):,.0f}", f"Portefeuille crédit {d}"))
+        for d in devises:
+            cartes.append(carte(f"{s['rembs'].get(d,0):,.0f}", f"Remboursements {d}"))
+        cartes.append(carte(s['retards'], "Crédits en retard",
+                            "#C0392B" if s['retards']>0 else "#1E8449"))
+        cartes.append(carte(f"{solde:,.0f}", "Solde net (toutes devises)",
+                            "#1E8449" if solde>=0 else "#C0392B"))
+        kpi = "\n  ".join(cartes)
+
+        series = []
+        for d in devises:
+            series.append((f"Épargnes {d}", s["ep"].get(d, 0), "#1E8449"))
+        for d in devises:
+            series.append((f"Crédit {d}", s["pf_actif"].get(d, 0), "#7D6608"))
+        for d in devises:
+            series.append((f"Remboursé {d}", s["rembs"].get(d, 0), "#6C3483"))
+        series.append(("Solde net", max(solde, 0), "#2980B9"))
+        svg_bar = ChartEngine.svg_bar(series)
         svg_pie = ChartEngine.svg_pie([
             ("Actifs", s.get("cr_actifs", 0), "#2980B9"),
             ("Retard", s["retards"], "#C0392B"),
@@ -2331,23 +4159,16 @@ class OngletRapports(ttk.Frame):
 <h1>AkibaCore — Rapport Financier</h1>
 <p>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')} | Version {APP_VERSION}</p>
 <div class="kpi">
-  <div class="k"><div class="v">{s['membres']}</div><div class="l">Membres actifs</div></div>
-  <div class="k"><div class="v">{s['ep']:,.0f}</div><div class="l">Épargnes FC</div></div>
-  <div class="k"><div class="v">{s['pf_actif']:,.0f}</div><div class="l">Portefeuille crédit FC</div></div>
-  <div class="k"><div class="v">{s['rembs']:,.0f}</div><div class="l">Remboursements FC</div></div>
-  <div class="k" style="background:{'#C0392B' if s['retards']>0 else '#1E8449'}">
-    <div class="v">{s['retards']}</div><div class="l">Crédits en retard</div></div>
-  <div class="k" style="background:{'#1E8449' if solde>=0 else '#C0392B'}">
-    <div class="v">{solde:,.0f}</div><div class="l">Solde net FC</div></div>
+  {kpi}
 </div>
 <div class="charts">
   <div class="chart-box"><h3>Vue financière</h3>{svg_bar}</div>
   <div class="chart-box"><h3>Statut des crédits</h3>{svg_pie}</div>
 </div>
 <h2>Liste des membres</h2>
-<table><tr><th>Nom complet</th><th>Téléphone</th><th>Statut</th><th>Épargne FC</th></tr>
+<table><tr><th>Nom complet</th><th>Téléphone</th><th>Statut</th><th>Épargnes (par devise)</th></tr>
 {''.join(tr_m(m) for m in membres)}</table>
-{'<h2>Crédits en retard</h2><table><tr><th>Nom</th><th>Téléphone</th><th>Solde FC</th><th>Échéance</th><th>Retard</th></tr>' + ''.join(tr_r(r) for r in retards) + '</table>' if retards else ''}
+{'<h2>Crédits en retard</h2><table><tr><th>Nom</th><th>Téléphone</th><th>Solde</th><th>Échéance</th><th>Retard</th></tr>' + ''.join(tr_r(r) for r in retards) + '</table>' if retards else ''}
 </body></html>"""
 
         p = filedialog.asksaveasfilename(
@@ -2366,6 +4187,7 @@ class OngletRapports(ttk.Frame):
 
     def _sauver(self):
         try:
+            self.auth.exiger("backup.create", contexte="sauvegarde manuelle")
             dest = self.bkp.sauvegarder()
             self.db.audit(self.auth.uid, self.auth.ulogin, "SAUVEGARDE",
                           details={"dest": dest})
@@ -2373,6 +4195,1393 @@ class OngletRapports(ttk.Frame):
                 f"Base de données sauvegardée :\n{dest}")
         except Exception as e:
             messagebox.showerror("Erreur sauvegarde", str(e))
+
+
+# ════════════════════════════════════════════════════════════════
+#  ADMINISTRATION — UTILISATEURS, RÔLES, JOURNAL D'ACTIVITÉ
+# ════════════════════════════════════════════════════════════════
+
+class OngletAdmin(ttk.Frame):
+    """Gestion multi-utilisateurs + permissions granulaires + audit."""
+
+    def __init__(self, parent, db, auth, avec_id=1):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.avec_id = avec_id
+        self.columnconfigure(0, weight=1); self.rowconfigure(0, weight=1)
+        self._ui()
+
+    def _ui(self):
+        nb = ttk.Notebook(self)
+        nb.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        self._tab_utilisateurs(nb)
+        self._tab_journal(nb)
+        self.actualiser()
+
+    def _tab_utilisateurs(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Utilisateurs")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ttk.Label(bar, text="Comptes utilisateurs", style="Titre.TLabel").pack(side="left")
+        for txt, cmd, st, perm in [
+            ("+ Nouvel utilisateur", self.ajouter,     "Vert.TButton",  "users.create"),
+            ("Modifier",             self.modifier,    "Bleu.TButton",  "users.edit"),
+            ("Permissions",          self.permissions, "Bleu.TButton",  "users.permissions"),
+            ("Rôles",                self.roles,       "Bleu.TButton",  "users.permissions"),
+            ("Activer/Désactiver",   self.bascule,     "Rouge.TButton", "users.disable"),
+            ("Réinitialiser mdp",    self.reinit,      "TButton",       "users.edit"),
+            ("Actualiser",           self.actualiser,  "TButton",       "users.view"),
+        ]:
+            if not self.auth.permis(perm):
+                continue
+            btn(bar, txt, cmd, st).pack(side="right", padx=3)
+
+        cols = ("ID","Nom","Login","Rôle","Statut","AVEC","Dernière connexion","Créé le")
+        lrg  = [40, 160, 120, 130, 80, 120, 170, 140]
+        self.tv, f = treeview(tab, cols, lrg)
+        f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        self.tv.bind("<Double-1>", lambda e: self.permissions())
+        self.v_res = tk.StringVar()
+        ttk.Label(tab, textvariable=self.v_res,
+                  font=(FONT, 10, "bold")).grid(row=2, column=0, pady=6)
+
+    def _tab_journal(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Journal d'activité")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ttk.Label(bar, text="Journal d'activité (audit)").pack(side="left")
+        ttk.Label(bar, text="Utilisateur :").pack(side="left", padx=(16, 4))
+        self.v_filtre = tk.StringVar()
+        self.cb_f = ttk.Combobox(bar, textvariable=self.v_filtre, state="readonly",
+                                 width=16)
+        self.cb_f.pack(side="left")
+        self.v_filtre.trace("w", lambda *a: self.actualiser_journal())
+        btn(bar, "Actualiser", self.actualiser_journal).pack(side="right", padx=3)
+        if self.auth.permis("audit.view"):
+            btn(bar, "Exporter CSV", self._exp_audit).pack(side="right", padx=3)
+
+        cols = ("Date","Utilisateur","Action","Table","ID","Détails")
+        lrg  = [160, 110, 180, 100, 60, 480]
+        self.tv_j, f = treeview(tab, cols, lrg)
+        f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        self.actualiser_journal()
+
+    def actualiser(self):
+        for it in self.tv.get_children():
+            self.tv.delete(it)
+        users = self.db.tous("""
+            SELECT u.*, a.nom as avec_nom FROM utilisateur u
+            LEFT JOIN avec a ON u.avec_id=a.id ORDER BY u.id
+        """)
+        for i, u in enumerate(users):
+            tag = ("rouge" if not u["actif"] else ("p" if i % 2 == 0 else "i"))
+            self.tv.insert("", "end", iid=str(u["id"]), tags=(tag,), values=(
+                u["id"], u["nom"], u["login"], u["role"],
+                "Actif" if u["actif"] else "Désactivé",
+                (u["avec_nom"] if not u["avec_id"] or u["avec_id"] == self.avec_id
+                 else u["avec_nom"] or "—"),
+                u["derniere_connexion"] or "—", u["cree_le"] or "—"))
+        self.v_res.set(f"{len(users)} utilisateur(s)")
+        logins = sorted({r["login"] for r in users})
+        self.cb_f["values"] = ["Tous"] + [l for l in logins][:200]
+        if not self.v_filtre.get():
+            self.v_filtre.set("Tous")
+
+    def actualiser_journal(self):
+        for it in self.tv_j.get_children():
+            self.tv_j.delete(it)
+        filtre = self.v_filtre.get() if hasattr(self, "v_filtre") else "Tous"
+        if filtre in (None, "", "Tous"):
+            rows = self.db.tous(
+                "SELECT ts,login,action,tbl,rid,details FROM audit_log"
+                " ORDER BY id DESC LIMIT 400")
+        else:
+            rows = self.db.tous(
+                "SELECT ts,login,action,tbl,rid,details FROM audit_log"
+                " WHERE login=? ORDER BY id DESC LIMIT 400", (filtre,))
+        for i, r in enumerate(rows):
+            self.tv_j.insert("", "end", tags=("p" if i % 2 == 0 else "i",), values=(
+                r["ts"] or "", r["login"] or "", r["action"], r["tbl"] or "",
+                r["rid"] if r["rid"] is not None else "", r["details"] or ""))
+
+    def _exp_audit(self):
+        self.auth.exiger("audit.view", contexte="export journal CSV")
+        p = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="audit.csv",
+                                         filetypes=[("CSV", "*.csv")])
+        if not p:
+            return
+        rows = self.db.tous(
+            "SELECT ts,login,action,tbl,rid,details FROM audit_log ORDER BY id DESC")
+        with open(p, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["Horodatage", "Utilisateur", "Action", "Table", "ID", "Détails"])
+            w.writerows([[r["ts"], r["login"], r["action"], r["tbl"],
+                          r["rid"], r["details"]] for r in rows])
+        self.db.audit(self.auth.uid, self.auth.ulogin, "EXPORT_CSV",
+                      details={"fichier": p, "lignes": len(rows)})
+        messagebox.showinfo("Export réussi", f"Fichier exporté :\n{p}")
+
+    def _sel(self):
+        s = self.tv.focus()
+        if not s:
+            messagebox.showwarning("Sélection", "Sélectionnez un utilisateur.")
+            return None
+        return int(s)
+
+    def ajouter(self):
+        DlgUtilisateur(self, self.db, self.auth, self.avec_id,
+                       callback=self.actualiser)
+
+    def modifier(self):
+        uid = self._sel()
+        if uid:
+            u = self.db.un("SELECT * FROM utilisateur WHERE id=?", (uid,))
+            DlgUtilisateur(self, self.db, self.auth, self.avec_id, utilisateur=u,
+                           callback=self.actualiser)
+
+    def permissions(self):
+        uid = self._sel()
+        if uid:
+            u = self.db.un("SELECT * FROM utilisateur WHERE id=?", (uid,))
+            DlgPermissions(self, self.db, self.auth, u, callback=self.actualiser)
+
+    def roles(self):
+        DlgRoles(self, self.db, self.auth)
+
+    def bascule(self):
+        uid = self._sel()
+        if not uid:
+            return
+        u = self.db.un("SELECT * FROM utilisateur WHERE id=?", (uid,))
+        if u["id"] == self.auth.uid:
+            messagebox.showwarning("Impossible",
+                                   "Vous ne pouvez pas désactiver votre propre compte.")
+            return
+        try:
+            self.auth.exiger("users.disable", contexte="activation/désactivation")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        nouvel_etat = 0 if u["actif"] else 1
+        if not messagebox.askyesno(
+                "Confirmer",
+                "Désactiver ce compte ? Il ne pourra plus se connecter." if nouvel_etat == 0
+                else "Réactiver ce compte ?", parent=self):
+            return
+        self.db.exec("UPDATE utilisateur SET actif=? WHERE id=?", (nouvel_etat, uid))
+        self.db.commit()
+        action = "DESACTIVER_UTILISATEUR" if nouvel_etat == 0 else "REACTIVER_UTILISATEUR"
+        self.db.audit(self.auth.uid, self.auth.ulogin, action, "utilisateur", uid,
+                      {"login": u["login"]})
+        self.actualiser()
+
+    def reinit(self):
+        uid = self._sel()
+        if not uid:
+            return
+        u = self.db.un("SELECT * FROM utilisateur WHERE id=?", (uid,))
+        try:
+            self.auth.exiger("users.edit", contexte="réinitialisation mot de passe")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        nouveau = simpledialog.askstring(
+            "Réinitialiser le mot de passe",
+            f"Nouveau mot de passe pour « {u['nom']} » :\n(minimum 4 caractères)",
+            parent=self)
+        if nouveau is None:
+            return
+        if len(nouveau) < 4:
+            messagebox.showerror("Erreur", "Minimum 4 caractères."); return
+        if nouveau == MDP_DEFAUT:
+            messagebox.showerror("Erreur",
+                "Le mot de passe usine est interdit.\nChoisissez-en un autre.")
+            return
+        sel = secrets.token_hex(16)
+        ph = hashlib.pbkdf2_hmac('sha256', f"{nouveau}{sel}".encode(),
+                                 sel.encode(), 100000).hex()
+        self.db.exec("UPDATE utilisateur SET pwd_hash=?,sel=? WHERE id=?",
+                     (ph, sel, uid))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "REINITIALISER_MDP",
+                      "utilisateur", uid, {"login": u["login"]})
+        messagebox.showinfo("Succès", "Mot de passe réinitialisé.")
+
+
+class DlgUtilisateur(tk.Toplevel):
+    """Création / modification d'un compte local (jamais supprimé physique)."""
+
+    def __init__(self, parent, db, auth, avec_id, utilisateur=None, callback=None):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.avec_id = avec_id
+        self.u = utilisateur; self.cb = callback
+        self.title("Modifier l'utilisateur" if utilisateur else "Nouvel utilisateur")
+        self.resizable(False, False); self.grab_set()
+        centrer(self, 460, 400)
+        self._ui()
+
+    def _ui(self):
+        u = self.u or {}
+        frm = ttk.Frame(self, padding=20)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        ttk.Label(frm, text="Compte utilisateur local", style="Sub.TLabel").grid(
+            row=0, column=0, columnspan=2, pady=(0, 14))
+
+        self.v_nom, _  = champ(frm, "Nom complet *", 1, u.get("nom", ""))
+        self.v_log, _  = champ(frm, "Identifiant *", 2, u.get("login", ""))
+        if not self.u:
+            self.v_mdp, _ = champ(frm, "Mot de passe *", 3, secret=True)
+        positions = [("Rôle", 4), ("AVEC", 5)]
+
+        ttk.Label(frm, text="Rôle").grid(row=4, column=0, sticky="e", padx=(0, 8), pady=5)
+        self.v_role = tk.StringVar(value=u.get("role", "agent"))
+        roles = [r["nom"] for r in self.db.tous("SELECT nom FROM role ORDER BY nom")]
+        if u.get("role") not in roles:
+            roles.insert(0, u.get("role"))
+        ttk.Combobox(frm, textvariable=self.v_role, values=roles,
+                     state="readonly", width=26).grid(row=4, column=1, sticky="ew", pady=5)
+
+        ttk.Label(frm, text="AVEC").grid(row=5, column=0, sticky="e", padx=(0, 8), pady=5)
+        avecs = self.db.tous("SELECT id,nom FROM avec ORDER BY id")
+        self.amap = {a["nom"]: a["id"] for a in avecs}
+        self.v_avec = tk.StringVar(value=u.get("avec_id", self.avec_id) or self.avec_id)
+        nom_avec = next((n for n, i in self.amap.items()
+                         if i == (u.get("avec_id") or self.avec_id)), None) or ""
+        self.v_avec = tk.StringVar(value=nom_avec)
+        ttk.Combobox(frm, textvariable=self.v_avec, values=list(self.amap.keys()),
+                     state="readonly", width=26).grid(row=5, column=1, sticky="ew", pady=5)
+
+        self.v_actif = tk.BooleanVar(value=bool(u.get("actif", 1)))
+        ttk.Checkbutton(frm, text="Compte actif", variable=self.v_actif).grid(
+            row=6, column=1, sticky="w", pady=5)
+
+        bf = ttk.Frame(frm)
+        bf.grid(row=7, column=0, columnspan=2, pady=16)
+        btn(bf, "Enregistrer", self._sauver, "Vert.TButton").pack(side="left", padx=8)
+        btn(bf, "Annuler", self.destroy).pack(side="left", padx=8)
+
+        for var in (self.v_nom, self.v_log):
+            var.trace("w", lambda *a: self.v_role.set(self.v_role.get()))
+
+    def _sauver(self):
+        try:
+            if self.u:
+                self.auth.exiger("users.edit", contexte="modification utilisateur")
+            else:
+                self.auth.exiger("users.create", contexte="création utilisateur")
+            nom  = self.v_nom.get().strip()
+            login = self.v_log.get().strip()
+            if not nom or not login:
+                raise ValueError("Le nom et l'identifiant sont obligatoires.")
+            if not re.match(r"^[A-Za-z0-9._\-]+$", login):
+                raise ValueError("Identifiant invalide (lettres, chiffres, . _ - uniquement).")
+            avec_id = self.amap.get(self.v_avec.get(), self.avec_id)
+            role = self.v_role.get() or "agent"
+            actif = 1 if self.v_actif.get() else 0
+            if self.u:
+                self.db.exec("""
+                    UPDATE utilisateur SET nom=?, role=?, actif=?, avec_id=?
+                    WHERE id=?""", (nom, role, actif, avec_id, self.u["id"]))
+                self.db.commit()
+                self.db.audit(self.auth.uid, self.auth.ulogin, "MODIFIER_UTILISATEUR",
+                              "utilisateur", self.u["id"],
+                              {"login": login, "role": role, "actif": actif})
+            else:
+                mdp = self.v_mdp.get()
+                if len(mdp) < 4:
+                    raise ValueError("Le mot de passe doit contenir au moins 4 caractères.")
+                if mdp == MDP_DEFAUT:
+                    raise ValueError("Le mot de passe usine est interdit pour les nouveaux comptes.")
+                sel = secrets.token_hex(16)
+                ph  = hashlib.pbkdf2_hmac('sha256', f"{mdp}{sel}".encode(),
+                                          sel.encode(), 100000).hex()
+                cur = self.db.exec(
+                    "INSERT INTO utilisateur(nom,login,pwd_hash,sel,role,actif,avec_id)"
+                    " VALUES(?,?,?,?,?,?,?)",
+                    (nom, login, ph, sel, role, actif, avec_id))
+                self.db.commit()
+                self.db.audit(self.auth.uid, self.auth.ulogin, "CREER_UTILISATEUR",
+                              "utilisateur", cur.lastrowid,
+                              {"login": login, "role": role, "actif": actif})
+            if self.cb: self.cb()
+            self.destroy()
+        except (PermissionError, ValueError, sqlite3.Error) as e:
+            messagebox.showerror("Erreur", str(e), parent=self)
+
+
+class DlgPermissions(tk.Toplevel):
+    """Éditeur de permissions granulaires pour un utilisateur."""
+
+    def __init__(self, parent, db, auth, utilisateur, callback=None):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.u = utilisateur; self.cb = callback
+        self.title(f"Permissions — {utilisateur['nom']}")
+        self.geometry("620x560")
+        self.grab_set()
+        centrer(self, 620, 560)
+        self.vars = {}
+        self._ui()
+
+    def _ui(self):
+        u = self.u
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(0, weight=1); frm.rowconfigure(1, weight=1)
+
+        ttk.Label(frm, text=f"Permissions de « {u['nom']} » — {u['login']}",
+                  style="Sub.TLabel").grid(row=0, column=0, sticky="w")
+        if u["role"] == "admin":
+            ttk.Label(frm, text="L'administrateur dispose automatiquement de TOUTES les permissions.",
+                      foreground=C["or"]).grid(row=0, column=0, sticky="e")
+
+        # Frame scrollable
+        canevas = tk.Canvas(frm, highlightthickness=0)
+        barre = ttk.Scrollbar(frm, orient="vertical", command=canevas.yview)
+        contenant = ttk.Frame(canevas)
+        contenant.bind("<Configure>",
+                       lambda e: canevas.configure(scrollregion=canevas.bbox("all")))
+        canevas.create_window((0, 0), window=contenant, anchor="nw")
+        canevas.configure(yscrollcommand=barre.set)
+        canevas.grid(row=1, column=0, sticky="nsew")
+        barre.grid(row=1, column=1, sticky="ns")
+        frm.columnconfigure(0, weight=1)
+
+        deja = {p["code"] for p in self.db.tous(
+            "SELECT code FROM user_permission WHERE utilisateur_id=?",
+            (self.u["id"],))}
+        groupes = {}
+        for code, lib, grp in PERMISSIONS:
+            groupes.setdefault(grp, []).append((code, lib))
+
+        rang = 0
+        for grp, items in groupes.items():
+            ttk.Label(contenant, text=grp, style="Sub.TLabel").grid(
+                row=rang, column=0, sticky="w", pady=(8, 0)); rang += 1
+            for code, lib in items:
+                var = tk.BooleanVar(value=code in deja)
+                self.vars[code] = var
+                ttk.Checkbutton(contenant, text=lib, variable=var).grid(
+                    row=rang, column=0, sticky="w", padx=(18, 0)); rang += 1
+
+        bande = ttk.Frame(frm)
+        bande.grid(row=2, column=0, sticky="ew", pady=10)
+        def tout(etat):
+            for v in self.vars.values():
+                v.set(etat)
+        btn(bande, "Tout sélectionner", lambda: tout(True)).pack(side="left", padx=4)
+        btn(bande, "Tout désélectionner", lambda: tout(False)).pack(side="left", padx=4)
+        btn(bande, "Enregistrer", self._sauver, "Vert.TButton").pack(side="right", padx=4)
+        btn(bande, "Annuler", self.destroy).pack(side="right", padx=4)
+
+    def _sauver(self):
+        try:
+            self.auth.exiger("users.permissions",
+                             contexte=f"permissions de {self.u['login']}")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e), parent=self); return
+        if not messagebox.askyesno("Confirmer",
+                "Appliquer ces permissions à l'utilisateur ?\nLes permissions "
+                "actuelles seront remplacées.", parent=self):
+            return
+        self.db.exec("DELETE FROM user_permission WHERE utilisateur_id=?",
+                     (self.u["id"],))
+        for code, var in self.vars.items():
+            if var.get():
+                self.db.exec("INSERT OR IGNORE INTO user_permission"
+                             "(utilisateur_id,code) VALUES(?,?)",
+                             (self.u["id"], code))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "DEFINIR_PERMISSIONS",
+                      "utilisateur", self.u["id"],
+                      {"login": self.u["login"],
+                       "nb": sum(1 for v in self.vars.values() if v.get())})
+        if self.u["id"] == self.auth.uid:
+            self.auth._charger_permissions()
+        if self.cb: self.cb()
+        self.destroy()
+
+
+class DlgRoles(tk.Toplevel):
+    """Gestion des rôles (ensembles de permissions) et des permissions du rôle."""
+
+    def __init__(self, parent, db, auth):
+        super().__init__(parent)
+        self.db = db; self.auth = auth
+        self.title("Rôles et permissions")
+        self.resizable(False, False); self.grab_set()
+        centrer(self, 720, 480)
+        self._ui()
+        self.actualiser()
+
+    def _ui(self):
+        frm = ttk.Frame(self, padding=16)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(0, weight=1); frm.rowconfigure(1, weight=1)
+
+        bar = ttk.Frame(frm)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(bar, text="Rôles", style="Titre.TLabel").pack(side="left")
+        btn(bar, "+ Nouveau rôle", self.ajouter, "Vert.TButton").pack(side="right", padx=3)
+        btn(bar, "Modifier", self.modifier, "Bleu.TButton").pack(side="right", padx=3)
+        btn(bar, "Permissions", self.permissions, "Bleu.TButton").pack(side="right", padx=3)
+        btn(bar, "Supprimer", self.supprimer, "Rouge.TButton").pack(side="right", padx=3)
+
+        cols = ("Nom", "Description", "Type")
+        lrg  = [170, 420, 90]
+        self.tv, f = treeview(frm, cols, lrg)
+        f.grid(row=1, column=0, sticky="nsew")
+
+    def actualiser(self):
+        for it in self.tv.get_children():
+            self.tv.delete(it)
+        roles = self.db.tous("SELECT * FROM role ORDER BY nom")
+        for i, r in enumerate(roles):
+            self.tv.insert("", "end", iid=str(r["id"]), tags=("p" if i % 2 == 0 else "i",),
+                           values=(r["nom"], r["description"] or "",
+                                   "Prédéfini" if r["systeme"] else "Personnalisé"))
+        self.roles = roles
+
+    def _sel(self):
+        s = self.tv.focus()
+        if not s:
+            messagebox.showwarning("Sélection", "Sélectionnez un rôle.")
+            return None
+        return int(s)
+
+    def ajouter(self):
+        try:
+            self.auth.exiger("users.permissions", contexte="créer un rôle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        nom = simpledialog.askstring("Nouveau rôle", "Nom du rôle :", parent=self)
+        if not nom or not nom.strip():
+            return
+        nom = nom.strip()
+        if self.db.un("SELECT id FROM role WHERE nom=?", (nom,)):
+            messagebox.showerror("Erreur", "Ce rôle existe déjà."); return
+        self.db.exec("INSERT INTO role(nom,description,systeme) VALUES(?,?,0)",
+                     (nom, "Rôle personnalisé"))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "AJOUTER_ROLE",
+                      "role", details={"nom": nom})
+        self.actualiser()
+
+    def modifier(self):
+        rid = self._sel()
+        if not rid: return
+        r = self.db.un("SELECT * FROM role WHERE id=?", (rid,))
+        nouveau = simpledialog.askstring("Modifier le rôle",
+            "Description du rôle :", parent=self, initialvalue=r["description"] or "")
+        if nouveau is None:
+            return
+        try:
+            self.auth.exiger("users.permissions", contexte="modifier un rôle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        self.db.exec("UPDATE role SET description=? WHERE id=?", (nouveau.strip() or None, rid))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "MODIFIER_ROLE",
+                      "role", rid, {"nom": r["nom"]})
+        self.actualiser()
+
+    def permissions(self):
+        rid = self._sel()
+        if not rid: return
+        r = self.db.un("SELECT * FROM role WHERE id=?", (rid,))
+        DlgRolePermissions(self, self.db, self.auth, r, callback=self.actualiser)
+
+    def supprimer(self):
+        rid = self._sel()
+        if not rid: return
+        r = self.db.un("SELECT * FROM role WHERE id=?", (rid,))
+        if r["systeme"]:
+            messagebox.showwarning("Rôle système",
+                                   "Les rôles prédéfinis ne peuvent pas être supprimés.")
+            return
+        if not messagebox.askyesno("Confirmer",
+                f"Supprimer le rôle « {r['nom']} » ?", parent=self):
+            return
+        try:
+            self.auth.exiger("users.permissions", contexte="supprimer un rôle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        self.db.exec("DELETE FROM role WHERE id=?", (rid,))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "SUPPRIMER_ROLE",
+                      "role", rid, {"nom": r["nom"]})
+        self.actualiser()
+
+
+class DlgRolePermissions(DlgPermissions):
+    """Réutilise l'éditeur de permissions pour un rôle (toujours refusé)."""
+
+    def __init__(self, parent, db, auth, role, callback=None):
+        self.role = role
+        self.vars = {}
+        self._cibles = []
+        super().__init__(parent, db, auth, {"nom": role["nom"], "login": role["nom"],
+                                            "id": role["id"], "role": "role"},
+                         callback=callback)
+
+    def _ui(self):
+        u = {"nom": self.role["nom"], "login": self.role["nom"]}
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(0, weight=1); frm.rowconfigure(1, weight=1)
+        ttk.Label(frm, text=f"Permissions du rôle « {self.role['nom']} »",
+                  style="Sub.TLabel").grid(row=0, column=0, sticky="w")
+
+        canevas = tk.Canvas(frm, highlightthickness=0)
+        barre = ttk.Scrollbar(frm, orient="vertical", command=canevas.yview)
+        contenant = ttk.Frame(canevas)
+        contenant.bind("<Configure>",
+                       lambda e: canevas.configure(scrollregion=canevas.bbox("all")))
+        canevas.create_window((0, 0), window=contenant, anchor="nw")
+        canevas.configure(yscrollcommand=barre.set)
+        canevas.grid(row=1, column=0, sticky="nsew")
+        barre.grid(row=1, column=1, sticky="ns")
+
+        deja = {p["code"] for p in self.db.tous(
+            "SELECT code FROM role_permission WHERE role_id=?", (self.role["id"],))}
+        groupes = {}
+        for code, lib, grp in PERMISSIONS:
+            groupes.setdefault(grp, []).append((code, lib))
+        rang = 0
+        for grp, items in groupes.items():
+            ttk.Label(contenant, text=grp, style="Sub.TLabel").grid(
+                row=rang, column=0, sticky="w", pady=(8, 0)); rang += 1
+            for code, lib in items:
+                var = tk.BooleanVar(value=code in deja)
+                self.vars[code] = var
+                ttk.Checkbutton(contenant, text=lib, variable=var).grid(
+                    row=rang, column=0, sticky="w", padx=(18, 0)); rang += 1
+
+        bande = ttk.Frame(frm)
+        bande.grid(row=2, column=0, sticky="ew", pady=10)
+        def tout(etat):
+            for v in self.vars.values():
+                v.set(etat)
+        btn(bande, "Tout sélectionner", lambda: tout(True)).pack(side="left", padx=4)
+        btn(bande, "Tout désélectionner", lambda: tout(False)).pack(side="left", padx=4)
+        btn(bande, "Enregistrer", self._sauver, "Vert.TButton").pack(side="right", padx=4)
+        btn(bande, "Annuler", self.destroy).pack(side="right", padx=4)
+
+    def _sauver(self):
+        try:
+            self.auth.exiger("users.permissions",
+                             contexte=f"permissions du rôle {self.role['nom']}")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e), parent=self); return
+        if not messagebox.askyesno("Confirmer",
+                f"Appliquer ces permissions au rôle « {self.role['nom']} » ?",
+                parent=self):
+            return
+        self.db.exec("DELETE FROM role_permission WHERE role_id=?", (self.role["id"],))
+        for code, var in self.vars.items():
+            if var.get():
+                self.db.exec("INSERT OR IGNORE INTO role_permission"
+                             "(role_id,code) VALUES(?,?)", (self.role["id"], code))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "DEFINIR_PERMISSIONS",
+                      "role", self.role["id"], {"nom": self.role["nom"]})
+        if self.cb: self.cb()
+        self.destroy()
+
+
+# ════════════════════════════════════════════════════════════════
+#  DOCUMENTS — MODÈLES, REÇUS, DOCUMENTS GÉNÉRÉS
+# ════════════════════════════════════════════════════════════════
+
+class OngletDocuments(ttk.Frame):
+    """Modèles par AVEC, historique des reçus, documents générés."""
+
+    def __init__(self, parent, db, auth, avec_id=1):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.avec_id = avec_id
+        self.columnconfigure(0, weight=1); self.rowconfigure(0, weight=1)
+        Modeles._creer_dossiers()
+        self._ui()
+
+    def _ui(self):
+        nb = ttk.Notebook(self)
+        nb.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        self._tab_modeles(nb)
+        self._tab_recus(nb)
+        self._tab_generes(nb)
+
+    def _tab_modeles(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Modèles")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ttk.Label(bar, text="Modèles de documents (par AVEC)",
+                  style="Titre.TLabel").pack(side="left")
+        for txt, cmd, st, perm in [
+            ("+ Ajouter un modèle", self.ajouter_modele, "Vert.TButton", "documents.add_template"),
+            ("Modifier",            self.modifier_modele, "Bleu.TButton", "documents.edit_template"),
+            ("Supprimer",           self.supprimer_modele, "Rouge.TButton", "documents.delete_template"),
+            ("Par défaut",          self.defaut_modele,  "Bleu.TButton", "documents.edit_template"),
+            ("Générer document",    self.generer,        "Vert.TButton", "documents.generate"),
+            ("Actualiser",          self.actualiser_modeles, "TButton", "documents.view"),
+        ]:
+            if not self.auth.permis(perm):
+                continue
+            btn(bar, txt, cmd, st).pack(side="right", padx=3)
+
+        cols = ("ID","Nom","Type","Format","AVEC","Par défaut","Créé le","Modifié le")
+        lrg  = [40, 200, 140, 70, 130, 90, 140, 140]
+        self.tv_m, f = treeview(tab, cols, lrg)
+        f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        self.tv_m.bind("<Double-1>", lambda e: self.modifier_modele())
+        self.v_aide = tk.StringVar()
+        ttk.Label(tab, textvariable=self.v_aide, font=(FONT, 9),
+                  foreground=C["texte_mute"]).grid(row=2, column=0, sticky="w", padx=16)
+        self.v_aide.set("Formats : DOCX, ODT, HTML, TXT — champs {{VARIABLE}} remplacés "
+                        "à la génération. Variables : " + " ".join(
+                            "{{" + v + "}}" for v in list(Modeles.NAUT)))
+        self.actualiser_modeles()
+
+    def actualiser_modeles(self):
+        for it in self.tv_m.get_children():
+            self.tv_m.delete(it)
+        rows = self.db.tous("""
+            SELECT t.*, a.nom as avec_nom FROM document_template t
+            JOIN avec a ON t.avec_id=a.id ORDER BY t.avec_id, t.nom
+        """)
+        for i, r in enumerate(rows):
+            tag = ("vert" if r["par_defaut"] else ("p" if i % 2 == 0 else "i"))
+            self.tv_m.insert("", "end", iid=str(r["id"]), tags=(tag,), values=(
+                r["id"], r["nom"], r["type"], r["format"], r["avec_nom"],
+                "✓" if r["par_defaut"] else "", r["cree_le"] or "", r["modifie_le"] or ""))
+
+    def _sel_modele(self):
+        s = self.tv_m.focus()
+        if not s:
+            messagebox.showwarning("Sélection", "Sélectionnez un modèle.")
+            return None
+        return int(s)
+
+    def ajouter_modele(self):
+        try:
+            self.auth.exiger("documents.add_template", contexte="ajout modèle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        chemin = filedialog.askopenfilename(
+            title="Choisir un modèle (DOCX / ODT / HTML / TXT)",
+            filetypes=[("Modèles", "*.docx *.odt *.html *.htm *.txt"),
+                       ("Tous", "*.*")])
+        if not chemin:
+            return
+        ext = Path(chemin).suffix.lower().lstrip(".")
+        if ext not in FORMATS_MODELES:
+            messagebox.showerror("Format non supporté",
+                f"Supportés : DOCX, ODT, HTML, TXT.\nReçu : .{ext}")
+            return
+        nom = simpledialog.askstring("Nom du modèle", "Nom du modèle :", parent=self)
+        if not nom:
+            return
+        type_ = simpledialog.askstring("Type de document",
+            "Type (Reçu, Attestation, Rapport financier, Relevé membre, Bilan,\n"
+            "Procès-verbal, …) :", parent=self, initialvalue="Reçu")
+        if not type_:
+            return
+        deja = self.db.un(
+            "SELECT id FROM document_template WHERE avec_id=? AND par_defaut=1 AND type=?",
+            (self.avec_id, type_))
+        par_defaut = (not deja) and messagebox.askyesno(
+            "Modèle par défaut",
+            f"Définir ce modèle comme modèle par défaut pour « {type_} » ?")
+        try:
+            Modeles.importer(self.db, chemin, self.avec_id, nom, type_,
+                             self.auth.uid, par_defaut=1 if par_defaut else 0)
+            self.actualiser_modeles()
+        except ValueError as e:
+            messagebox.showerror("Erreur", str(e))
+
+    def modifier_modele(self):
+        mid = self._sel_modele()
+        if not mid: return
+        ml = self.db.un("SELECT * FROM document_template WHERE id=?", (mid,))
+        try:
+            self.auth.exiger("documents.edit_template", contexte="modification modèle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        nom = simpledialog.askstring("Modifier le modèle", "Nom du modèle :",
+                                     parent=self, initialvalue=ml["nom"])
+        if not nom:
+            return
+        self.db.exec("UPDATE document_template SET nom=?, modifie_le=datetime('now','localtime')"
+                     " WHERE id=?", (nom.strip(), mid))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "MODIFIER_MODELE",
+                      "document_template", mid, {"nom": nom.strip()})
+        self.actualiser_modeles()
+
+    def supprimer_modele(self):
+        mid = self._sel_modele()
+        if not mid: return
+        ml = self.db.un("SELECT * FROM document_template WHERE id=?", (mid,))
+        if not messagebox.askyesno(
+                "Confirmer suppression",
+                f"Supprimer le modèle « {ml['nom']} » ?\n"
+                "Le fichier sera déplacé dans documents/archives.", parent=self):
+            return
+        try:
+            self.auth.exiger("documents.delete_template", contexte="suppression modèle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        fichier = ml.get("fichier")
+        if fichier and Path(fichier).is_file():
+            try:
+                shutil.move(fichier, str(DOC_ARC / Path(fichier).name))
+            except OSError:
+                pass
+        self.db.exec("DELETE FROM document_template WHERE id=?", (mid,))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "SUPPRIMER_MODELE",
+                      "document_template", mid, {"nom": ml["nom"]})
+        self.actualiser_modeles()
+
+    def defaut_modele(self):
+        mid = self._sel_modele()
+        if not mid: return
+        ml = self.db.un("SELECT * FROM document_template WHERE id=?", (mid,))
+        try:
+            self.auth.exiger("documents.edit_template",
+                             contexte=f"défaut {ml['type']}")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        self.db.exec("UPDATE document_template SET par_defaut=0 WHERE avec_id=? AND type=?",
+                     (self.avec_id, ml["type"]))
+        self.db.exec("UPDATE document_template SET par_defaut=1, "
+                     "modifie_le=datetime('now','localtime') WHERE id=?", (mid,))
+        self.db.commit()
+        self.db.audit(self.auth.uid, self.auth.ulogin, "MODELE_PAR_DEFAUT",
+                      "document_template", mid, {"type": ml["type"]})
+        self.actualiser_modeles()
+
+    def generer(self):
+        DlgGenererDocument(self, self.db, self.auth, self.avec_id,
+                           callback=self.actualiser_generes)
+
+    def _tab_recus(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Reçus")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ttk.Label(bar, text="Historique des reçus", style="Titre.TLabel").pack(side="left")
+        ttk.Label(bar, text="Recherche :").pack(side="left", padx=(16, 4))
+        self.v_rech_r = tk.StringVar()
+        self.v_rech_r.trace("w", lambda *a: self.actualiser_recus())
+        ttk.Entry(bar, textvariable=self.v_rech_r, width=18).pack(side="left")
+        for txt, cmd, st, perm in [
+            ("Voir le reçu",    self.voir_recu,   "Bleu.TButton", "receipts.view"),
+            ("Réimprimer",      self.reimprimer,  "Vert.TButton", "receipts.reprint"),
+            ("Enregistrer PDF", self.recu_pdf,    "TButton",      "receipts.view"),
+            ("Actualiser",      self.actualiser_recus, "TButton", "receipts.view"),
+        ]:
+            if not self.auth.permis(perm):
+                continue
+            btn(bar, txt, cmd, st).pack(side="right", padx=3)
+
+        cols = ("N° Reçu","Date","Type","Membre","Montant","Devise","Utilisateur")
+        lrg  = [130, 145, 170, 180, 110, 60, 100]
+        self.tv_r, f = treeview(tab, cols, lrg)
+        f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        self.tv_r.bind("<Double-1>", lambda e: self.voir_recu())
+        self.actualiser_recus()
+
+    def actualiser_recus(self):
+        for it in self.tv_r.get_children():
+            self.tv_r.delete(it)
+        terme = self.v_rech_r.get().strip().lower() if hasattr(self, "v_rech_r") else ""
+        rows = self.db.tous("""
+            SELECT r.*, m.nom, m.prenom, m.numero, u.nom as unom
+            FROM receipt r LEFT JOIN membre m ON r.membre_id=m.id
+            LEFT JOIN utilisateur u ON r.cree_par=u.id
+            WHERE r.avec_id=? ORDER BY r.id DESC LIMIT 600
+        """, (self.avec_id,))
+        for i, r in enumerate(rows):
+            nc = f"{r['nom'] or ''} {r['prenom'] or ''}".strip() or "—"
+            if terme and terme not in (r["recu_no"] + " " + nc).lower():
+                continue
+            self.tv_r.insert("", "end", iid=str(r["id"]),
+                             tags=("p" if i % 2 == 0 else "i"), values=(
+                r["recu_no"], r["cree_le"] or "", Recep.ligne(r["type"]), nc,
+                f"{r['montant'] or 0:,.0f}", r["devise"] or DEVISE_DEFAUT,
+                r["unom"] or "—"))
+
+    def _sel_recu(self):
+        s = self.tv_r.focus()
+        if not s:
+            messagebox.showwarning("Sélection", "Sélectionnez un reçu.")
+            return None
+        return int(s)
+
+    def _recu_complet(self, rid):
+        r = self.db.un("SELECT * FROM receipt WHERE id=?", (rid,))
+        if not r: return None
+        membre = self.db.un("SELECT * FROM membre WHERE id=?", (r["membre_id"],)) or {}
+        avec = self.db.un("SELECT * FROM avec WHERE id=?", (r["avec_id"],)) or {}
+        details = {}
+        try:
+            details = json.loads(r["details"] or "{}")
+        except ValueError:
+            details = {}
+        return r, avec, membre, details
+
+    def voir_recu(self):
+        rid = self._sel_recu()
+        if not rid: return
+        try:
+            self.auth.exiger("receipts.view", contexte="consulter reçu")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        r, avec, membre, details = self._recu_complet(rid)
+        texte = Recep.texte(r, avec, membre, details)
+        dlg = tk.Toplevel(self); dlg.title(f"Reçu {r['recu_no']}")
+        dlg.resizable(False, False)
+        centrer(dlg, 600, 520)
+        from tkinter import scrolledtext
+        st = scrolledtext.ScrolledText(dlg, width=66, height=24, font=("Courier", 9))
+        st.pack(fill="both", expand=True, padx=10, pady=10)
+        st.insert("1.0", texte); st.config(state="disabled")
+
+    def reimprimer(self):
+        rid = self._sel_recu()
+        if not rid: return
+        try:
+            self.auth.exiger("receipts.reprint", contexte="réimpression reçu")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        r, avec, membre, details = self._recu_complet(rid)
+        imprimer_recu(self, self.auth, r, avec, membre, details or None,
+                      (self.auth.user or {}).get("nom", ""),
+                      (self.auth.user or {}).get("role", ""), reimprime=True)
+
+    def recu_pdf(self):
+        rid = self._sel_recu()
+        if not rid: return
+        try:
+            self.auth.exiger("receipts.view", contexte="export PDF reçu")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        r, avec, membre, details = self._recu_complet(rid)
+        texte = Recep.texte(r, avec, membre, details)
+        pdf_path = str(DOC_REC / (r["recu_no"] + ".pdf"))
+        PDFGen.generer(texte.split("\n"), pdf_path)
+        self.db.audit(self.auth.uid, self.auth.ulogin, "RECU_EXPORT_PDF",
+                      "receipt", rid, {"recu_no": r["recu_no"]})
+        messagebox.showinfo("Export PDF", f"Reçu enregistré :\n{pdf_path}")
+
+    def _tab_generes(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Documents générés")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(1, weight=1)
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ttk.Label(bar, text="Documents générés depuis les modèles",
+                  style="Titre.TLabel").pack(side="left")
+        btn(bar, "Ouvrir le dossier", self.ouvrir_dossier).pack(side="right", padx=3)
+        btn(bar, "Actualiser", self.actualiser_generes).pack(side="right", padx=3)
+
+        cols = ("ID","Date","Type","Nom du fichier","Utilisateur")
+        lrg  = [40, 150, 150, 420, 110]
+        self.tv_g, f = treeview(tab, cols, lrg)
+        f.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        self.actualiser_generes()
+
+    def actualiser_generes(self):
+        for it in self.tv_g.get_children():
+            self.tv_g.delete(it)
+        rows = self.db.tous("""
+            SELECT d.*, u.nom as unom FROM document_genere d
+            LEFT JOIN utilisateur u ON d.cree_par=u.id
+            WHERE d.avec_id=? ORDER BY d.id DESC LIMIT 400
+        """, (self.avec_id,))
+        for i, r in enumerate(rows):
+            self.tv_g.insert("", "end", iid=str(r["id"]),
+                             tags=("p" if i % 2 == 0 else "i"), values=(
+                r["id"], r["cree_le"] or "", r["type"] or "",
+                r["nom_fichier"] or "", r["unom"] or "—"))
+
+    def ouvrir_dossier(self):
+        try:
+            Imprimeur.ouvrir(str(DOC_GEN))
+        except Exception:
+            messagebox.showinfo("Documents", f"Dossier :\n{DOC_GEN}")
+
+
+class DlgGenererDocument(tk.Toplevel):
+    """Génère un document depuis un modèle avec les variables {{...}}."""
+
+    def __init__(self, parent, db, auth, avec_id, callback=None):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.avec_id = avec_id; self.cb = callback
+        self.title("Générer un document")
+        self.geometry("760x600")
+        self.grab_set()
+        Modeles._creer_dossiers()
+        self._ui()
+        self._maj_contexte()
+
+    def _ui(self):
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1); frm.rowconfigure(4, weight=1)
+
+        self.modeles = self.db.tous("""
+            SELECT * FROM document_template WHERE avec_id=? ORDER BY par_defaut DESC, nom
+        """, (self.avec_id,))
+        if not self.modeles:
+            ttk.Label(frm, text="Aucun modèle disponible pour cette AVEC.\n"
+                                "Ajoutez d'abord un modèle (onglet Modèles).",
+                      foreground=C["rouge"]).grid(row=0, column=0, columnspan=3, pady=20)
+            return
+
+        ttk.Label(frm, text="Modèle *").grid(row=0, column=0, sticky="e", padx=(0, 8), pady=5)
+        self.v_ml = tk.StringVar()
+        cbm = ttk.Combobox(frm, textvariable=self.v_ml,
+                           values=[f"{m['nom']} ({m['type']})" for m in self.modeles],
+                           state="readonly", width=34)
+        cbm.grid(row=0, column=1, sticky="ew", pady=5)
+        cbm.bind("<<ComboboxSelected>>", lambda e: self._apercu())
+
+        ttk.Label(frm, text="Membre").grid(row=1, column=0, sticky="e", padx=(0, 8), pady=5)
+        membres = self.db.tous("SELECT id,nom,prenom,numero,nb_parts,telephone,adresse,statut "
+                               "FROM membre WHERE avec_id=? ORDER BY nom",
+                               (self.avec_id,))
+        self.mmap = {f"{m['nom']} {m['prenom'] or ''}".strip(): m for m in membres}
+        self.v_mm = tk.StringVar()
+        cbm2 = ttk.Combobox(frm, textvariable=self.v_mm, values=list(self.mmap.keys()),
+                            state="readonly", width=34)
+        cbm2.grid(row=1, column=1, sticky="ew", pady=5)
+        cbm2.bind("<<ComboboxSelected>>", lambda e: self._maj_contexte())
+
+        ttk.Label(frm, text="Crédit").grid(row=2, column=0, sticky="e", padx=(0, 8), pady=5)
+        self.v_cr = tk.StringVar()
+        self.crmap = {}
+        self.cb_cr = ttk.Combobox(frm, textvariable=self.v_cr, state="readonly", width=34)
+        self.cb_cr.grid(row=2, column=1, sticky="ew", pady=5)
+        self.cb_cr.bind("<<ComboboxSelected>>", lambda e: self._maj_contexte())
+
+        ttk.Label(frm, text="Champs supplémentaires").grid(
+            row=3, column=0, sticky="ne", padx=(0, 8), pady=5)
+        self.txt_vars = tk.Text(frm, width=38, height=5, font=(FONT, 9))
+        self.txt_vars.grid(row=3, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Label(frm, text="Une variable par ligne :  NOM=valeur", foreground=C["texte_mute"],
+                  font=(FONT, 8)).grid(row=3, column=2, sticky="w", padx=(6, 0))
+
+        apercu_f = ttk.LabelFrame(frm, text="Prévisualisation (données réelles)")
+        apercu_f.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=6)
+        apercu_f.columnconfigure(0, weight=1); apercu_f.rowconfigure(0, weight=1)
+        self.txt_ap = tk.Text(apercu_f, width=80, height=12, font=("Courier", 9))
+        self.txt_ap.grid(row=0, column=0, sticky="nsew")
+        barre = ttk.Scrollbar(apercu_f, command=self.txt_ap.yview)
+        barre.grid(row=0, column=1, sticky="ns")
+        self.txt_ap.config(yscrollcommand=barre.set)
+
+        bande = ttk.Frame(frm)
+        bande.grid(row=5, column=0, columnspan=3, pady=10)
+        btn(bande, "Prévisualiser", self._apercu).pack(side="left", padx=4)
+        btn(bande, "Générer", self._generer, "Vert.TButton").pack(side="left", padx=4)
+        btn(bande, "Imprimer", self._imprimer, "Bleu.TButton").pack(side="left", padx=4)
+        btn(bande, "Exporter PDF", self._pdf).pack(side="left", padx=4)
+        btn(bande, "Fermer", self.destroy).pack(side="right", padx=4)
+        self._apercu()
+
+    def _ml(self):
+        lbl = self.v_ml.get()
+        for m in self.modeles:
+            if f"{m['nom']} ({m['type']})" == lbl:
+                return m
+        return None
+
+    def _maj_contexte(self, ev=None):
+        if not hasattr(self, "v_mm"):
+            return
+        # Crédits du membre sélectionné
+        nom = self.v_mm.get()
+        m = self.mmap.get(nom)
+        if m:
+            creds = self.db.tous("""
+                SELECT * FROM credit WHERE membre_id=? AND statut IN ('actif','en_retard')
+            """, (m["id"],))
+            self.crmap = {f"Crédit #{c['id']} — Solde {Finance.solde_credit(c):,.0f} "
+                          f"{c['devise'] or DEVISE_DEFAUT}":
+                          c for c in creds}
+            self.cb_cr["values"] = list(self.crmap.keys())
+            self.v_cr.set(list(self.crmap.keys())[0] if self.crmap else "")
+        else:
+            self.crmap = {}
+            self.cb_cr["values"] = []
+            self.v_cr.set("")
+        self._apercu()
+
+    def _valeurs(self):
+        avec = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,))
+        nom = self.v_mm.get()
+        m = self.mmap.get(nom)
+        cr = None
+        lblc = self.v_cr.get() if hasattr(self, "v_cr") else ""
+        if self.crmap and lblc in self.crmap:
+            cr = self.crmap[lblc]
+        contexte = {}
+        for ligne in self.txt_vars.get("1.0", "end").splitlines():
+            if "=" in ligne:
+                k, v = ligne.split("=", 1)
+                if k.strip():
+                    contexte[k.strip().upper()] = v
+        if "SESSION_NUMERO" not in contexte or "DATE_REUNION" not in contexte:
+            sess = self.db.un(
+                "SELECT id, numero, date_reunion FROM session WHERE avec_id=? "
+                "ORDER BY id DESC LIMIT 1", (self.avec_id,))
+            if sess:
+                contexte.setdefault("SESSION_NUMERO",
+                                    str(sess["numero"] or sess["id"]))
+                contexte.setdefault("DATE_REUNION", sess["date_reunion"] or "")
+        return Modeles.valeurs_standard(
+            avec, membre=m, credit=cr, contexte=contexte, auth=self.auth)
+
+    def _contenu_substitue(self):
+        ml = self._ml()
+        if not ml:
+            return "", None
+        contenu = Modeles.lire_contenu(ml["fichier"]) if ml["fichier"] else ml.get("contenu") or ""
+        return Modeles.substituer(contenu, self._valeurs()), ml
+
+    def _apercu(self):
+        contenu, ml = self._contenu_substitue()
+        self.txt_ap.config(state="normal")
+        self.txt_ap.delete("1.0", "end")
+        if not ml:
+            self.txt_ap.insert("1.0", "Sélectionnez un modèle.")
+        else:
+            self.txt_ap.insert("1.0",
+                Modeles.texte_apercu(contenu, ml["format"])[:12000])
+        self.txt_ap.config(state="disabled")
+
+    def _sortie(self, ml):
+        hor = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nom = re.sub(r"[^A-Za-z0-9_\-]", "_", ml["nom"])
+        return str(DOC_GEN / f"{hor}_{nom}.{ml['format']}")
+
+    def _generer(self, ouvrir_apres=False):
+        try:
+            self.auth.exiger("documents.generate", contexte="génération document")
+            ml = self._ml()
+            if not ml:
+                raise ValueError("Sélectionnez un modèle.")
+            sortie = self._sortie(ml)
+            Modeles.generer(ml, self._valeurs(), sortie)
+            self.db.exec("INSERT INTO document_genere"
+                         "(avec_id,template_id,type,nom_fichier,variables,cree_par)"
+                         " VALUES(?,?,?,?,?,?)",
+                         (self.avec_id, ml["id"], ml["type"], Path(sortie).name,
+                          json.dumps(self._valeurs(), ensure_ascii=False),
+                          self.auth.uid))
+            self.db.commit()
+            self.db.audit(self.auth.uid, self.auth.ulogin, "GENERER_DOCUMENT",
+                          "document_template", ml["id"],
+                          {"fichier": Path(sortie).name, "type": ml["type"]})
+            messagebox.showinfo("Document généré",
+                                f"Fichier créé :\n{sortie}", parent=self)
+            if self.cb: self.cb()
+            if ouvrir_apres:
+                return sortie
+            return sortie
+        except (PermissionError, ValueError, sqlite3.Error, OSError) as e:
+            messagebox.showerror("Erreur", str(e), parent=self)
+
+    def _imprimer(self):
+        try:
+            self.auth.exiger("documents.print", contexte="impression document")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e), parent=self); return
+        sortie = self._generer()
+        if not sortie:
+            return
+        if Imprimeur.imprimer(sortie):
+            self.db.audit(self.auth.uid, self.auth.ulogin, "DOCUMENT_IMPRIME",
+                          details={"fichier": Path(sortie).name})
+            messagebox.showinfo("Impression", "Document envoyé à l'imprimante.",
+                                parent=self)
+        else:
+            messagebox.showwarning(
+                "Impression indisponible",
+                "Aucune imprimante détectée.\nLe document a été généré dans :\n%s"
+                % sortie, parent=self)
+
+    def _pdf(self):
+        try:
+            self.auth.exiger("documents.export", contexte="export PDF document")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e), parent=self); return
+        ml = self._ml()
+        if not ml:
+            messagebox.showwarning("Modèle", "Sélectionnez un modèle."); return
+        try:
+            contenu = Modeles.texte_apercu(self._contenu_substitue()[0], ml["format"])
+        except (ValueError, OSError) as e:
+            messagebox.showerror("Erreur", str(e), parent=self)
+            return
+        pdf = str(DOC_GEN / Path(self._sortie(ml)).stem + ".pdf")
+        try:
+            PDFGen.generer(contenu.split("\n"), pdf)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Erreur", str(e), parent=self)
+            return
+        self.db.audit(self.auth.uid, self.auth.ulogin, "DOCUMENT_EXPORT_PDF",
+                      details={"fichier": Path(pdf).name})
+        messagebox.showinfo("Export PDF",
+                            f"Document PDF généré :\n{pdf}", parent=self)
+
+
+# ════════════════════════════════════════════════════════════════
+#  PARAMÈTRES — INFORMATIONS AVEC + IMPRESSION + SAUVEGARDES
+# ════════════════════════════════════════════════════════════════
+
+class OngletParametres(ttk.Frame):
+    """Informations de l'AVEC, paramètres financiers, sauvegardes."""
+
+    def __init__(self, parent, db, auth, avec_id=1):
+        super().__init__(parent)
+        self.db = db; self.auth = auth; self.avec_id = avec_id
+        self.bkp = Backup()
+        self.columnconfigure(0, weight=1)
+        self._ui()
+
+    def _ui(self):
+        a = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,)) or {}
+
+        # ── Informations générales ──────────────────────────────
+        frm = ttk.LabelFrame(self, text="Informations de l'AVEC", padding=16)
+        frm.pack(fill="x", padx=16, pady=(14, 8))
+        frm.columnconfigure(1, weight=1)
+
+        champs = [
+            ("nom", "Nom de l'AVEC *", a.get("nom", "")),
+            ("adresse", "Adresse", a.get("adresse") or ""),
+            ("telephone", "Téléphone", a.get("telephone") or ""),
+            ("email", "E-mail", a.get("email") or ""),
+            ("devise", "Devise principale", a.get("devise") or DEVISE_DEFAUT),
+            ("description", "Description", a.get("description") or ""),
+            ("montant_part", "Montant de la part", str(a.get("montant_part") or "")),
+        ]
+        self.vs = {}
+        for i, (cle, lib, val) in enumerate(champs):
+            self.vs[cle], _ = champ(frm, lib, i, val)
+        self.v_auto = tk.BooleanVar(value=bool(int(a.get("impression_auto") or 0)))
+        ttk.Checkbutton(frm, text="Imprimer automatiquement les reçus après une opération",
+                        variable=self.v_auto).grid(row=len(champs), column=0,
+                                                   columnspan=2, sticky="w", pady=8)
+
+        bf = ttk.Frame(frm)
+        bf.grid(row=len(champs) + 1, column=0, columnspan=2, pady=8)
+        btn(bf, "Enregistrer les paramètres", self._enregistrer,
+            "Vert.TButton").pack(side="left", padx=8)
+        if not self.auth.permis("settings.edit"):
+            for w in frm.winfo_children():
+                if isinstance(w, ttk.Entry):
+                    w.configure(state="disabled")
+
+        # ── Paramètres financiers ───────────────────────────────
+        fin = ttk.LabelFrame(self, text="Paramètres financiers", padding=16)
+        fin.pack(fill="x", padx=16, pady=8)
+        fin.columnconfigure(1, weight=1)
+
+        self.vf = {}
+        champs_fin = [
+            ("taux_interet", "Taux d'intérêt annuel — standard (ex : 0.10 = 10 %)",
+             str(a.get("taux_interet") or TAUX_INTERET_DEFAUT)),
+            ("taux_interet_urgence", "Taux d'intérêt annuel — urgence (ex : 0.15)",
+             str(a.get("taux_interet_urgence") or 0.15)),
+            ("taux_interet_investissement", "Taux d'intérêt annuel — investissement (ex : 0.10)",
+             str(a.get("taux_interet_investissement") or 0.10)),
+            ("taux_penalite", "Taux de pénalité de retard mensuel (ex : 0.02 = 2 %/mois)",
+             str(a.get("taux_penalite") or TAUX_PENALITE_DEFAUT)),
+        ]
+        for i, (cle, lib, val) in enumerate(champs_fin):
+            self.vf[cle], _ = champ(fin, lib, i, val)
+
+        self.dev_bv = {d: tk.BooleanVar(value=d in _devises_autorisees(a))
+                       for d in DEVISES}
+        ttk.Label(fin, text="Devises autorisées :").grid(
+            row=len(champs_fin), column=0, sticky="nw", padx=(0, 8), pady=6)
+        devf = ttk.Frame(fin)
+        devf.grid(row=len(champs_fin), column=1, sticky="w", pady=4)
+        for d in DEVISES:
+            ttk.Checkbutton(devf, text=d, variable=self.dev_bv[d]).pack(
+                side="left", padx=8)
+
+        self.typ_bv = {t: tk.BooleanVar(value=t in _types_credit_avec(a))
+                       for t in TYPES_CREDIT}
+        ttk.Label(fin, text="Types de crédit autorisés :").grid(
+            row=len(champs_fin) + 1, column=0, sticky="nw", padx=(0, 8), pady=6)
+        tyf = ttk.Frame(fin)
+        tyf.grid(row=len(champs_fin) + 1, column=1, sticky="w", pady=4)
+        for t in TYPES_CREDIT:
+            ttk.Checkbutton(tyf, text=_le_libelle_type_credit(t),
+                            variable=self.typ_bv[t]).pack(side="left", padx=8)
+
+        bff = ttk.Frame(fin)
+        bff.grid(row=len(champs_fin) + 2, column=0, columnspan=2, pady=10)
+        btn(bff, "Enregistrer les paramètres financiers", self._enregistrer_fin,
+            "Vert.TButton").pack(side="left", padx=8)
+        ttk.Label(fin, text="Ces taux sont figés (clichés) sur chaque crédit à "
+                            "l'octroi ; les crédits existants ne changent pas.",
+                  font=(FONT, 9, "italic"), foreground=C["texte_mute"]).grid(
+            row=len(champs_fin) + 3, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        if not self.auth.permis("settings.financial.edit"):
+            for w in fin.winfo_children():
+                if isinstance(w, ttk.Entry):
+                    w.configure(state="disabled")
+            for d in DEVISES:
+                self.dev_bv[d].set(False)
+            for t in TYPES_CREDIT:
+                self.typ_bv[t].set(False)
+
+        # Zone sauvegardes
+        bk = ttk.LabelFrame(self, text="Sauvegardes de la base de données", padding=16)
+        bk.pack(fill="x", padx=16, pady=8)
+        last = Backup.derniere_sauvegarde()
+        ttk.Label(bk, text="Dernière sauvegarde : %s"
+                           % (last or "aucune encore")).pack(anchor="w")
+        bb = ttk.Frame(bk)
+        bb.pack(anchor="w", pady=8)
+        if self.auth.permis("backup.create"):
+            btn(bb, "Sauvegarder maintenant", self._sauver, "Vert.TButton").pack(
+                side="left", padx=4)
+        if self.auth.permis("backup.restore"):
+            btn(bb, "Restaurer la dernière sauvegarde", self._restaurer,
+                "Rouge.TButton").pack(side="left", padx=4)
+
+    def _enregistrer(self):
+        try:
+            self.auth.exiger("settings.edit", contexte="modification paramètres AVEC")
+            nom = self.vs["nom"].get().strip()
+            if not nom:
+                raise ValueError("Le nom de l'AVEC est obligatoire.")
+            try:
+                mp = float(self.vs["montant_part"].get() or 0)
+            except ValueError:
+                raise ValueError("Montant de la part invalide.")
+            if mp <= 0:
+                raise ValueError("Vérifiez : montant de la part > 0.")
+            dev = self.vs["devise"].get().strip().upper()
+            if dev not in DEVISES:
+                dev = DEVISE_DEFAUT
+            self.db.exec("""
+                UPDATE avec SET nom=?,adresse=?,telephone=?,email=?,devise=?,
+                description=?,montant_part=?,impression_auto=? WHERE id=?
+            """, (nom, self.vs["adresse"].get().strip() or None,
+                  self.vs["telephone"].get().strip() or None,
+                  self.vs["email"].get().strip() or None,
+                  dev,
+                  self.vs["description"].get().strip() or None,
+                  mp, 1 if self.v_auto.get() else 0, self.avec_id))
+            self.db.commit()
+            self.db.audit(self.auth.uid, self.auth.ulogin, "MODIFIER_AVEC",
+                          "avec", self.avec_id, {"nom": nom, "devise": dev})
+            messagebox.showinfo("Paramètres", "Paramètres de l'AVEC enregistrés.")
+        except (PermissionError, ValueError, sqlite3.Error) as e:
+            messagebox.showerror("Erreur", str(e))
+
+    def _enregistrer_fin(self):
+        try:
+            self.auth.exiger("settings.financial.edit",
+                             contexte="modification paramètres financiers")
+            a = self.db.un("SELECT * FROM avec WHERE id=?", (self.avec_id,)) or {}
+            try:
+                vals = {cle: float(self.vf[cle].get() or 0)
+                        for cle in ("taux_interet", "taux_interet_urgence",
+                                    "taux_interet_investissement", "taux_penalite")}
+            except ValueError:
+                raise ValueError("Taux invalides.")
+            for lib, v in vals.items():
+                if not (0 < v <= 1):
+                    raise ValueError(
+                        f"Taux « {lib} » invalide : il doit être entre 0 et 1.")
+            devises = [d for d in DEVISES if self.dev_bv[d].get()]
+            types = [t for t in TYPES_CREDIT if self.typ_bv[t].get()]
+            if not devises:
+                raise ValueError("Sélectionnez au moins une devise autorisée.")
+            if not types:
+                raise ValueError("Sélectionnez au moins un type de crédit.")
+            old = {k: (a.get(k)) for k in vals}
+            self.db.exec("""
+                UPDATE avec SET taux_interet=?,taux_interet_urgence=?,
+                taux_interet_investissement=?,taux_penalite=?,
+                devises_autorisees=?,types_credit=? WHERE id=?
+            """, (vals["taux_interet"], vals["taux_interet_urgence"],
+                  vals["taux_interet_investissement"], vals["taux_penalite"],
+                  json.dumps(devises), json.dumps(types), self.avec_id))
+            self.db.commit()
+            old["devises_autorisees"] = a.get("devises_autorisees")
+            old["types_credit"] = a.get("types_credit")
+            self.db.audit(self.auth.uid, self.auth.ulogin,
+                          "MODIFIER_PARAMS_FINANCIERS", "avec", self.avec_id,
+                          {"avant": old,
+                           "après": {"taux_interet": vals["taux_interet"],
+                                     "taux_interet_urgence": vals["taux_interet_urgence"],
+                                     "taux_interet_investissement": vals["taux_interet_investissement"],
+                                     "taux_penalite": vals["taux_penalite"],
+                                     "devises_autorisees": devises,
+                                     "types_credit": types}})
+            messagebox.showinfo(
+                "Paramètres financiers",
+                "Paramètres financiers enregistrés.\n"
+                "Les crédits déjà octroyés conservent leurs taux.\n"
+                "Les nouveaux crédits utilisent ces paramètres.")
+        except (PermissionError, ValueError, sqlite3.Error) as e:
+            messagebox.showerror("Erreur", str(e))
+
+    def _sauver(self):
+        try:
+            self.auth.exiger("backup.create", contexte="sauvegarde manuelle")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        try:
+            dest = self.bkp.sauvegarder()
+            self.db.audit(self.auth.uid, self.auth.ulogin, "SAUVEGARDE",
+                          details={"dest": dest, "source": "parametres"})
+            messagebox.showinfo("Sauvegarde réussie",
+                                f"Base de données sauvegardée :\n{dest}")
+        except Exception as e:
+            messagebox.showerror("Erreur sauvegarde", str(e))
+
+    def _restaurer(self):
+        try:
+            self.auth.exiger("backup.restore", contexte="restauration sauvegarde")
+        except PermissionError as e:
+            messagebox.showerror("Erreur", str(e)); return
+        dernier = Backup.derniere_sauvegarde()
+        if not dernier:
+            messagebox.showwarning("Aucune sauvegarde",
+                                   "Aucune sauvegarde disponible dans :\n%s" % BACKUP_DIR)
+            return
+        if not messagebox.askyesno(
+                "Restaurer la sauvegarde",
+                "Restaurer la dernière sauvegarde ?\n\n"
+                f"Fichier : {dernier}\n\n"
+                "ATTENTION : la base actuelle sera remplacée.\n"
+                "Il est conseillé de sauvegarder d'abord la base courante.",
+                parent=self):
+            return
+        try:
+            self.bkp.sauvegarder()   # filet de sécurité
+        except Exception:
+            pass
+        Backup.restaurer()
+        messagebox.showinfo("Restauration",
+                            "Sauvegarde restaurée.\nReconnectez-vous pour continuer.",
+                            parent=self)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -2474,15 +5683,40 @@ class AkibaCore(tk.Tk):
 
         # ─ Barre latérale + zone de contenu ─
         self.avec_id = 1
-        self._onglets_defs = [
-            ("Tableau de Bord", "\u2302",  Dashboard),
-            ("Membres",         "\u263A",  OngletMembres),
-            ("Épargnes",        "\u25C7",  OngletEpargnes),
-            ("Crédits",         "\u25B6",  OngletCredits),
-            ("Remboursements",  "\u25C0",  OngletRemboursements),
-            ("Sessions",        "\u25A0",  OngletSessions),
-            ("Rapports",        "\u25CF",  OngletRapports),
+        onglets = [
+            ("Tableau de Bord", "\u2302",  Dashboard, None),
+            ("Membres",         "\u263A",  OngletMembres, "members"),
+            ("Épargnes",        "\u25C7",  OngletEpargnes, "savings"),
+            ("Crédits",         "\u25B6",  OngletCredits, "loans"),
+            ("Remboursements",  "\u25C0",  OngletRemboursements, "repayments"),
+            ("Comptes",         "\u25A3",  OngletComptes, "accounts"),
+            ("Sessions",        "\u25A0",  OngletSessions, "sessions"),
+            ("Rapports",        "\u25CF",  OngletRapports, "reports"),
+            ("Administration",  "\u2699",  OngletAdmin, ("users", "audit")),
+            ("Documents",       "\u2756",  OngletDocuments, "documents"),
+            ("Paramètres",      "\u25CE",  OngletParametres, "settings"),
         ]
+        # Chaque page n'apparaît que si l'utilisateur possède au moins une
+        # permission correspondante (ou est admin, qui a toutes les permissions).
+        def _page_autorisee(prefixes):
+            if prefixes is None:        # Tableau de Bord : toujours visible
+                return True
+            if self.auth.est_admin:
+                return True
+            if isinstance(prefixes, str):
+                prefixes = [prefixes]
+            return any(
+                self.auth.permis(code)
+                for code, _lib, _grp in PERMISSIONS
+                for pref in prefixes
+                if code.startswith(pref + ".")
+            )
+        self._onglets_defs = [
+            (nom, ic, Cls) for nom, ic, Cls, prefixes in onglets
+            if _page_autorisee(prefixes)
+        ]
+        if not self._onglets_defs:
+            self._onglets_defs = [("Tableau de Bord", "\u2302", Dashboard)]
         mid = tk.Frame(self, bg=C["gris"])
         mid.pack(fill="both", expand=True)
 
@@ -2509,12 +5743,57 @@ class AkibaCore(tk.Tk):
                        cursor="hand2").pack(side="right", padx=10, pady=4)
 
     def _naviguer(self, index):
-        """Charge l'onglet correspondant dans la zone de contenu."""
+        """Charge l'onglet correspondant dans la zone de contenu.
+
+        Une erreur pendant la construction d'une page ne doit JAMAIS laisser
+        une fenêtre vide (page blanche) : elle est journalisée et un message
+        clair est affiché avec une référence traçable.
+        """
         for w in self._conteneur.winfo_children():
             w.destroy()
-        _, _, Cls = self._onglets_defs[index]
-        page = Cls(self._conteneur, self.db, self.auth, self.avec_id)
-        page.pack(fill="both", expand=True)
+        try:
+            _, _, Cls = self._onglets_defs[index]
+            page = Cls(self._conteneur, self.db, self.auth, self.avec_id)
+            page.pack(fill="both", expand=True)
+        except Exception as exc:
+            ref = "AKB-" + str(int(datetime.now().timestamp() * 1000) % 1000000)
+            import traceback
+            try:
+                journal = REPERTOIRE_DONNEES / "erreur_demarrage.log"
+                with open(journal, "a", encoding="utf-8") as f:
+                    f.write("\n" + "=" * 60 + "\n")
+                    f.write(f"[{ref}] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            f" — échec affichage page (index {index})\n")
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
+            # Reconstruit un contenu minimal pour éviter la page blanche.
+            try:
+                cadre = tk.Frame(self._conteneur, bg=C["gris"])
+                cadre.pack(fill="both", expand=True)
+                ttk.Label(
+                    cadre,
+                    text="Une erreur est survenue lors de l'affichage de cette page.\n\n"
+                         "Veuillez réessayer ou contacter l'administrateur.",
+                    style="Titre.TLabel",
+                ).pack(pady=40)
+                ttk.Label(
+                    cadre,
+                    text=f"Référence : {ref}",
+                    font=(FONT, 10),
+                ).pack()
+            except Exception:
+                pass
+            try:
+                messagebox.showerror(
+                    "AkibaCore — Erreur",
+                    "Une erreur est survenue.\n"
+                    "Veuillez contacter l'administrateur.\n\n"
+                    f"Référence : {ref}",
+                    parent=self,
+                )
+            except Exception:
+                pass
 
     def _auto_backup(self):
         try:
@@ -2595,7 +5874,7 @@ if __name__ == "__main__":
         # trace écrite dans erreur_demarrage.log + boîte de dialogue.
         import traceback
         try:
-            journal = REPERTOIRE_APP / "erreur_demarrage.log"
+            journal = REPERTOIRE_DONNEES / "erreur_demarrage.log"
             with open(journal, "a", encoding="utf-8") as f:
                 f.write("\n" + "=" * 60 + "\n")
                 f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")

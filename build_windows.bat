@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Script de compilation AkibaCore v2.0.0 -> AkibaCore.exe
+REM  Script de compilation AkibaCore v2.2.0 -> AkibaCore.exe
 REM  A executer sur une machine Windows 10/11
 REM  Prerequis : Python 3.8+ installe (cocher "Add to PATH")
 REM ============================================================
@@ -44,8 +44,10 @@ echo.
 echo  Votre executable se trouve dans : dist\AkibaCore.exe
 echo.
 echo  Pour distribuer le logiciel, copiez UNIQUEMENT ce fichier
-echo  dans un dossier vide. La base akibacore.db sera creee
-echo  automatiquement a cote au premier lancement.
+echo  dans un dossier vide. Les donnees (akibacore.db, sauvegardes,
+echo  documents) seront creees automatiquement au premier lancement.
+echo  Si le dossier est protege en ecriture (ex : Program Files),
+echo  les donnees seront placees dans le dossier utilisateur.
 echo.
 echo  Identifiants initiaux : admin / admin123
 echo  (changement obligatoire au premier login)
